@@ -133,8 +133,13 @@ jobs:
                         f'UPSTASH_REDIS_REST_TOKEN = "{redis_token}"'
                     )
                     
-                    # Convert back to list format (preserving newlines)
-                    cell['source'] = source_code
+                    # CRITICAL FIX: Convert back to list format (Jupyter format)
+                    # If original was a list, convert back to list with newlines preserved
+                    if isinstance(source, list):
+                        cell['source'] = source_code.splitlines(keepends=True)
+                    else:
+                        cell['source'] = source_code
+                    
                     break
             
             return notebook_json
@@ -169,6 +174,18 @@ jobs:
                 # STEP 2: Inject Redis credentials
                 log(f"Injecting Redis credentials...", "💉")
                 notebook_data = inject_redis_credentials(notebook_data, redis_url, redis_token)
+                
+                # Verify injection worked (debug)
+                for cell in notebook_data.get('cells', []):
+                    if cell.get('cell_type') == 'code':
+                        source = ''.join(cell.get('source', []))
+                        if 'UPSTASH_REDIS_REST_URL' in source:
+                            # Extract just the URL line for verification
+                            for line in source.split('\n'):
+                                if 'UPSTASH_REDIS_REST_URL' in line:
+                                    log(f"✓ Verified: {line.strip()[:80]}...", "🔍")
+                                    break
+                        break
                 
                 # STEP 3: Check if destination notebook exists
                 setup_kaggle_auth(account)
