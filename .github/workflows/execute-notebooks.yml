@@ -55,7 +55,7 @@ jobs:
         WEEKLY_SCHEDULE = {
             "Friday": [
                 {"username": "shreevathsaz", "key": "2faa3199cb4f8a0d88a8999604ac6770"},
-                {"username": "shreevathsamm", "key": "c625e9fd87ba7e4fe40312e5391feb60"}
+                {"username": "shreevathsamm", "key": "613f3e396b629b0df65e65e35fe7b243"}
             ],
             "Saturday": [
                 {"username": "vathsamm", "key": "33fad3a4dc6d92aa70fa90b62b9ebef4"},
