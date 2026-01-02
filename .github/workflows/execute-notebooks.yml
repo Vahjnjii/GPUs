@@ -266,6 +266,21 @@ jobs:
                         shutil.rmtree(d, ignore_errors=True)
 
         # ========================================
+        # PARALLEL EXECUTION WORKER
+        # ========================================
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        results_lock = threading.Lock()
+        
+        def execute_notebook_wrapper(args):
+            """Wrapper for parallel execution"""
+            account, notebook_name, dest_slug, redis_url, redis_token = args
+            result_key = f"{account['username']}/{notebook_name}"
+            success = execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token)
+            return (result_key, success)
+        
+        # ========================================
         # MAIN EXECUTION
         # ========================================
         def execute_all():
@@ -275,7 +290,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - WEEKLY SCHEDULE", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - PARALLEL MODE", "🚀")
             log("═" * 70, "")
             log(f"Current Day: {current_day}", "📅")
             log(f"Execution Time: {start.isoformat()}", "🕐")
@@ -295,52 +310,46 @@ jobs:
             
             log(f"Accounts scheduled: {len(accounts_today)}", "👥")
             log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
+            log(f"Execution Mode: PARALLEL (No delays)", "⚡")
             log("═" * 70, "")
-            
-            results = {}
-            redis_index = 0
             
             # Calculate starting Redis index based on day
             day_order = ["Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
+            redis_index = 0
             if current_day in day_order:
                 day_position = day_order.index(current_day)
-                # Each day before today used 4 Redis slots (2 accounts × 2 notebooks)
-                # Except Tuesday which might use only 2
                 redis_index = day_position * 4
             
+            # Prepare all tasks
+            tasks = []
             for account_idx, account in enumerate(accounts_today):
-                log("", "")
-                log("─" * 70, "")
-                log(f"ACCOUNT {account_idx + 1}/{len(accounts_today)}: {account['username']}", "👤")
-                log("─" * 70, "")
+                log(f"📋 Preparing tasks for: {account['username']}", "")
                 
-                # Execute server-1 and server-2 for this account
                 for notebook_name in ["server-1", "server-2"]:
                     dest_slug = f"{account['username']}/{notebook_name}"
-                    
-                    # Get Redis credentials from pool (cycling)
                     redis_url, redis_token = REDIS_POOL[redis_index % len(REDIS_POOL)]
-                    redis_index += 1
                     
-                    log("", "")
-                    result_key = f"{account['username']}/{notebook_name}"
-                    success = execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token)
+                    log(f"  • {notebook_name} → Redis: {redis_url.split('//')[1].split('.')[0]}", "")
+                    
+                    tasks.append((account, notebook_name, dest_slug, redis_url, redis_token))
+                    redis_index += 1
+            
+            log("", "")
+            log(f"🚀 Starting parallel execution of {len(tasks)} notebooks...", "")
+            log("═" * 70, "")
+            
+            results = {}
+            
+            # Execute all notebooks in parallel
+            with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+                future_to_task = {executor.submit(execute_notebook_wrapper, task): task for task in tasks}
+                
+                for future in as_completed(future_to_task):
+                    result_key, success = future.result()
                     results[result_key] = success
                     
-                    if success:
-                        log(f"✅ {notebook_name} completed successfully", "")
-                    else:
-                        log(f"❌ {notebook_name} failed", "")
-                    
-                    # Wait between notebooks
-                    if notebook_name == "server-1":  # Wait before server-2
-                        log("Waiting 60 seconds before next notebook...", "⏳")
-                        time.sleep(60)
-                
-                # Wait between accounts
-                if account_idx < len(accounts_today) - 1:
-                    log("Waiting 60 seconds before next account...", "⏳")
-                    time.sleep(60)
+                    status = "✅" if success else "❌"
+                    log(f"{status} Completed: {result_key}", "")
             
             # Summary
             success_count = sum(results.values())
@@ -355,7 +364,7 @@ jobs:
             log(f"Success: {success_count}/{len(results)}", "📊")
             log("", "")
             
-            for nb_name, success in results.items():
+            for nb_name, success in sorted(results.items()):
                 status = "✅" if success else "❌"
                 log(f"{status} {nb_name}", "")
             
