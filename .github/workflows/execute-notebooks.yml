@@ -1,4 +1,4 @@
-name: Kaggle Notebook Executor - Always Create Mode
+name: Kaggle Notebook Executor - V3 Final
 
 on:
   workflow_dispatch:
@@ -110,21 +110,26 @@ jobs:
                 return False, "", str(e)
 
         def inject_redis_credentials_text(notebook_path, redis_url, redis_token):
-            """Inject Redis credentials using text-based replacement (more reliable)"""
+            """
+            Inject Redis credentials using text-based replacement (FIXED for escaped quotes)
+            Replaces just the URL/Token without quotes to avoid JSON escaping issues
+            """
             # Read notebook as plain text
             with open(notebook_path, 'r', encoding='utf-8') as f:
                 notebook_text = f.read()
             
-            # Replace URL (as plain text in JSON)
+            # CRITICAL FIX: Replace just the URL (no quotes!) to handle JSON escaping
+            # In JSON, it appears as: "UPSTASH_REDIS_REST_URL = \\"https://...\\"
+            # So we replace just the URL part: https://...
             notebook_text = notebook_text.replace(
-                '"https://absolute-redfish-9172.upstash.io"',
-                f'"{redis_url}"'
+                'https://absolute-redfish-9172.upstash.io',
+                redis_url
             )
             
-            # Replace Token (as plain text in JSON)
+            # Replace Token (just the token value, no quotes)
             notebook_text = notebook_text.replace(
-                '"ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg"',
-                f'"{redis_token}"'
+                'ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg',
+                redis_token
             )
             
             # Write back
@@ -158,17 +163,19 @@ jobs:
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: Inject Redis credentials (TEXT-BASED - More Reliable!)
+                # STEP 2: Inject Redis credentials (TEXT-BASED - URL only, no quotes!)
                 log(f"Injecting Redis credentials...", "💉")
                 inject_redis_credentials_text(work_notebook_path, redis_url, redis_token)
                 
-                # Verify injection worked
+                # Verify injection worked (check for URL without protocol prefix)
                 with open(work_notebook_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    if redis_url in content:
-                        log(f"✓ Verified: Redis URL injected successfully", "🔍")
+                    # Check if new URL is present (just domain part to be sure)
+                    url_domain = redis_url.split('//')[1].split('.')[0]  # e.g., "fair-drake-18300"
+                    if url_domain in content:
+                        log(f"✓ Verified: {url_domain} injected successfully", "🔍")
                     else:
-                        log(f"⚠️ Warning: Redis URL not found in notebook!", "⚠️")
+                        log(f"⚠️ Warning: {url_domain} not found in notebook!", "⚠️")
                 
                 # STEP 3: Create FRESH metadata (ALWAYS CREATE MODE)
                 log(f"Creating fresh metadata (always create mode)...", "🆕")
@@ -259,7 +266,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - ALWAYS CREATE MODE", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - V3 FINAL (URL-Only Replacement)", "🚀")
             log("═" * 70, "")
             log(f"Current Day: {current_day}", "📅")
             log(f"Execution Time: {start.isoformat()}", "🕐")
@@ -279,7 +286,8 @@ jobs:
             
             log(f"Accounts scheduled: {len(accounts_today)}", "👥")
             log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
-            log(f"Execution Mode: ALWAYS CREATE (Fresh notebooks every time)", "⚡")
+            log(f"Mode: ALWAYS CREATE (Fresh notebooks every time)", "⚡")
+            log(f"Injection: URL-only replacement (handles JSON escaping)", "💉")
             log(f"Stagger: 2s interval to avoid API limits", "⏱️")
             log("═" * 70, "")
             
@@ -350,6 +358,10 @@ jobs:
                 sys.exit(1)
             else:
                 log("🎉 All notebooks executed successfully!", "")
+                log("", "")
+                log("🔍 VERIFICATION: Check notebooks on Kaggle to confirm unique Redis URLs:", "")
+                for nb_name in sorted(results.keys()):
+                    log(f"   https://www.kaggle.com/code/{nb_name}", "🔗")
 
         execute_all()
         PYEOF
