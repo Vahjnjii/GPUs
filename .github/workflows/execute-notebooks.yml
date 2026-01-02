@@ -1,4 +1,4 @@
-name: Kaggle Notebook Executor
+name: Kaggle Notebook Executor - Always Create Mode
 
 on:
   workflow_dispatch:
@@ -109,40 +109,29 @@ jobs:
             except Exception as e:
                 return False, "", str(e)
 
-        def inject_redis_credentials(notebook_json, redis_url, redis_token):
-            """Inject Redis credentials into the notebook code"""
-            for cell in notebook_json.get('cells', []):
-                if cell.get('cell_type') == 'code':
-                    source = cell.get('source', [])
-                    
-                    # Convert to string if it's a list
-                    if isinstance(source, list):
-                        source_code = ''.join(source)
-                    else:
-                        source_code = source
-                    
-                    # Replace URL
-                    source_code = source_code.replace(
-                        'UPSTASH_REDIS_REST_URL = "https://absolute-redfish-9172.upstash.io"',
-                        f'UPSTASH_REDIS_REST_URL = "{redis_url}"'
-                    )
-                    
-                    # Replace Token
-                    source_code = source_code.replace(
-                        'UPSTASH_REDIS_REST_TOKEN = "ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg"',
-                        f'UPSTASH_REDIS_REST_TOKEN = "{redis_token}"'
-                    )
-                    
-                    # CRITICAL FIX: Convert back to list format (Jupyter format)
-                    # If original was a list, convert back to list with newlines preserved
-                    if isinstance(source, list):
-                        cell['source'] = source_code.splitlines(keepends=True)
-                    else:
-                        cell['source'] = source_code
-                    
-                    break
+        def inject_redis_credentials_text(notebook_path, redis_url, redis_token):
+            """Inject Redis credentials using text-based replacement (more reliable)"""
+            # Read notebook as plain text
+            with open(notebook_path, 'r', encoding='utf-8') as f:
+                notebook_text = f.read()
             
-            return notebook_json
+            # Replace URL (as plain text in JSON)
+            notebook_text = notebook_text.replace(
+                '"https://absolute-redfish-9172.upstash.io"',
+                f'"{redis_url}"'
+            )
+            
+            # Replace Token (as plain text in JSON)
+            notebook_text = notebook_text.replace(
+                '"ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg"',
+                f'"{redis_token}"'
+            )
+            
+            # Write back
+            with open(notebook_path, 'w', encoding='utf-8') as f:
+                f.write(notebook_text)
+            
+            return True
 
         def execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token):
             log(f"START: {notebook_name} → {account['username']}", "🚀")
@@ -150,17 +139,15 @@ jobs:
             
             # Use absolute paths for thread safety
             base_dir = os.getcwd()
-            source_dir = os.path.join(base_dir, f"source_{notebook_name}_{account['username']}")
-            dest_dir = os.path.join(base_dir, f"dest_{notebook_name}_{account['username']}")
+            work_dir = os.path.join(base_dir, f"work_{notebook_name}_{account['username']}")
             
             try:
-                # Clean directories
-                for d in [source_dir, dest_dir]:
-                    if os.path.exists(d):
-                        shutil.rmtree(d)
-                    os.makedirs(d)
+                # Clean directory
+                if os.path.exists(work_dir):
+                    shutil.rmtree(work_dir)
+                os.makedirs(work_dir)
                 
-                # STEP 1: Load base notebook from repo
+                # STEP 1: Copy base notebook from repo
                 log(f"Loading base notebook template...", "📂")
                 base_notebook_path = os.path.join(base_dir, "server-4.ipynb")
                 
@@ -168,96 +155,55 @@ jobs:
                     log(f"ERROR: server-4.ipynb not found in repository!", "❌")
                     return False
                 
-                with open(base_notebook_path, 'r', encoding='utf-8') as f:
-                    notebook_data = json.load(f)
+                work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
+                shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: Inject Redis credentials
+                # STEP 2: Inject Redis credentials (TEXT-BASED - More Reliable!)
                 log(f"Injecting Redis credentials...", "💉")
-                notebook_data = inject_redis_credentials(notebook_data, redis_url, redis_token)
+                inject_redis_credentials_text(work_notebook_path, redis_url, redis_token)
                 
-                # Verify injection worked (debug)
-                for cell in notebook_data.get('cells', []):
-                    if cell.get('cell_type') == 'code':
-                        source = ''.join(cell.get('source', []))
-                        if 'UPSTASH_REDIS_REST_URL' in source:
-                            # Extract just the URL line for verification
-                            for line in source.split('\n'):
-                                if 'UPSTASH_REDIS_REST_URL' in line:
-                                    log(f"✓ Verified: {line.strip()[:80]}...", "🔍")
-                                    break
-                        break
+                # Verify injection worked
+                with open(work_notebook_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if redis_url in content:
+                        log(f"✓ Verified: Redis URL injected successfully", "🔍")
+                    else:
+                        log(f"⚠️ Warning: Redis URL not found in notebook!", "⚠️")
                 
-                # STEP 3: Check if destination notebook exists
-                setup_kaggle_auth(account)
-                time.sleep(0.3)
+                # STEP 3: Create FRESH metadata (ALWAYS CREATE MODE)
+                log(f"Creating fresh metadata (always create mode)...", "🆕")
+                metadata = {
+                    "id": dest_slug,
+                    "title": notebook_name,
+                    "code_file": f"{notebook_name}.ipynb",
+                    "language": "python",
+                    "kernel_type": "notebook",
+                    "is_private": True,
+                    "enable_gpu": True,
+                    "enable_internet": True,
+                    "enable_tpu": False,
+                    "dataset_sources": [],
+                    "kernel_sources": [],
+                    "competition_sources": []
+                }
                 
-                log(f"Checking if notebook exists: {dest_slug}...", "🔍")
-                success, stdout, stderr = run_cmd(f"kaggle kernels pull {dest_slug} -p {dest_dir} -m")
+                # Save metadata
+                metadata_path = os.path.join(work_dir, "kernel-metadata.json")
+                with open(metadata_path, 'w', encoding='utf-8') as f:
+                    json.dump(metadata, f, indent=2)
                 
-                dest_exists = success
+                log(f"Metadata created: id={metadata['id']}", "📝")
                 
-                if dest_exists:
-                    log(f"Notebook exists - UPDATE mode", "✅")
-                    
-                    # Use destination's metadata (has correct id_no)
-                    dest_metadata_file = os.path.join(dest_dir, "kernel-metadata.json")
-                    with open(dest_metadata_file, 'r', encoding='utf-8') as f:
-                        metadata = json.load(f)
-                    
-                    log(f"Using existing metadata: id={metadata.get('id')}, id_no={metadata.get('id_no')}", "📝")
-                    
-                    # Save modified notebook to dest directory
-                    dest_notebook_name = metadata.get('code_file', f"{notebook_name}.ipynb")
-                    with open(os.path.join(dest_dir, dest_notebook_name), 'w', encoding='utf-8') as f:
-                        json.dump(notebook_data, f, indent=2)
-                    
-                    # Update metadata if needed
-                    metadata['code_file'] = dest_notebook_name
-                    with open(dest_metadata_file, 'w', encoding='utf-8') as f:
-                        json.dump(metadata, f, indent=2)
-                    
-                    push_dir = dest_dir
-                    
-                else:
-                    log(f"Notebook doesn't exist - CREATE mode", "🆕")
-                    
-                    # Create new metadata
-                    metadata = {
-                        "id": dest_slug,
-                        "title": notebook_name,
-                        "code_file": f"{notebook_name}.ipynb",
-                        "language": "python",
-                        "kernel_type": "notebook",
-                        "is_private": True,
-                        "enable_gpu": True,
-                        "enable_internet": True,
-                        "enable_tpu": False,
-                        "dataset_sources": [],
-                        "kernel_sources": [],
-                        "competition_sources": []
-                    }
-                    
-                    # Save notebook and metadata to source directory
-                    with open(os.path.join(source_dir, f"{notebook_name}.ipynb"), 'w', encoding='utf-8') as f:
-                        json.dump(notebook_data, f, indent=2)
-                    
-                    with open(os.path.join(source_dir, "kernel-metadata.json"), 'w', encoding='utf-8') as f:
-                        json.dump(metadata, f, indent=2)
-                    
-                    log(f"New kernel metadata: id={metadata['id']}, slug={metadata.get('slug', notebook_name)}", "📝")
-                    push_dir = source_dir
-                
-                # STEP 4: Push to Kaggle (using cwd parameter - THREAD SAFE!)
+                # STEP 4: Push to Kaggle (THREAD-SAFE with cwd parameter)
                 setup_kaggle_auth(account)
                 time.sleep(0.3)
                 
                 # List directory contents
-                dir_contents = [f for f in os.listdir(push_dir)]
+                dir_contents = [f for f in os.listdir(work_dir)]
                 log(f"Directory contents: {dir_contents}", "📂")
                 
                 log(f"Pushing to Kaggle...", "📤")
-                # CRITICAL: Use cwd parameter instead of os.chdir() for thread safety
-                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=push_dir)
+                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
                     log(f"PUSH FAILED", "❌")
@@ -276,13 +222,12 @@ jobs:
                 return False
                 
             finally:
-                # Cleanup - no need to change directory
-                for d in [source_dir, dest_dir]:
-                    if os.path.exists(d):
-                        try:
-                            shutil.rmtree(d)
-                        except:
-                            pass  # Ignore cleanup errors
+                # Cleanup
+                if os.path.exists(work_dir):
+                    try:
+                        shutil.rmtree(work_dir)
+                    except:
+                        pass
 
         # ========================================
         # PARALLEL EXECUTION WORKER
@@ -314,7 +259,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - STAGGERED PARALLEL MODE", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - ALWAYS CREATE MODE", "🚀")
             log("═" * 70, "")
             log(f"Current Day: {current_day}", "📅")
             log(f"Execution Time: {start.isoformat()}", "🕐")
@@ -334,7 +279,8 @@ jobs:
             
             log(f"Accounts scheduled: {len(accounts_today)}", "👥")
             log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
-            log(f"Execution Mode: STAGGERED PARALLEL (2s interval to avoid API limits)", "⚡")
+            log(f"Execution Mode: ALWAYS CREATE (Fresh notebooks every time)", "⚡")
+            log(f"Stagger: 2s interval to avoid API limits", "⏱️")
             log("═" * 70, "")
             
             # Calculate starting Redis index based on day
@@ -364,12 +310,12 @@ jobs:
                     task_index += 1
             
             log("", "")
-            log(f"🚀 Starting staggered parallel execution ({len(tasks)} notebooks, 2s interval)...", "")
+            log(f"🚀 Starting execution ({len(tasks)} notebooks, 2s stagger)...", "")
             log("═" * 70, "")
             
             results = {}
             
-            # Execute all notebooks in parallel
+            # Execute all notebooks in parallel (with stagger)
             with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
                 future_to_task = {executor.submit(execute_notebook_wrapper, task): task for task in tasks}
                 
