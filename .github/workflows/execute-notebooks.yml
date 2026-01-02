@@ -276,8 +276,13 @@ jobs:
         results_lock = threading.Lock()
         
         def execute_notebook_wrapper(args):
-            """Wrapper for parallel execution"""
-            account, notebook_name, dest_slug, redis_url, redis_token = args
+            """Wrapper for parallel execution with stagger delay"""
+            account, notebook_name, dest_slug, redis_url, redis_token, start_delay = args
+            
+            # Stagger the start to avoid Kaggle API rate limiting
+            if start_delay > 0:
+                time.sleep(start_delay)
+            
             result_key = f"{account['username']}/{notebook_name}"
             success = execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token)
             return (result_key, success)
@@ -292,7 +297,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - PARALLEL MODE", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - STAGGERED PARALLEL MODE", "🚀")
             log("═" * 70, "")
             log(f"Current Day: {current_day}", "📅")
             log(f"Execution Time: {start.isoformat()}", "🕐")
@@ -312,7 +317,7 @@ jobs:
             
             log(f"Accounts scheduled: {len(accounts_today)}", "👥")
             log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
-            log(f"Execution Mode: PARALLEL (No delays)", "⚡")
+            log(f"Execution Mode: STAGGERED PARALLEL (2s interval to avoid API limits)", "⚡")
             log("═" * 70, "")
             
             # Calculate starting Redis index based on day
@@ -324,6 +329,7 @@ jobs:
             
             # Prepare all tasks
             tasks = []
+            task_index = 0
             for account_idx, account in enumerate(accounts_today):
                 log(f"📋 Preparing tasks for: {account['username']}", "")
                 
@@ -331,13 +337,17 @@ jobs:
                     dest_slug = f"{account['username']}/{notebook_name}"
                     redis_url, redis_token = REDIS_POOL[redis_index % len(REDIS_POOL)]
                     
-                    log(f"  • {notebook_name} → Redis: {redis_url.split('//')[1].split('.')[0]}", "")
+                    # Calculate stagger delay: 2 seconds between each task
+                    start_delay = task_index * 2
                     
-                    tasks.append((account, notebook_name, dest_slug, redis_url, redis_token))
+                    log(f"  • {notebook_name} → Redis: {redis_url.split('//')[1].split('.')[0]} (start +{start_delay}s)", "")
+                    
+                    tasks.append((account, notebook_name, dest_slug, redis_url, redis_token, start_delay))
                     redis_index += 1
+                    task_index += 1
             
             log("", "")
-            log(f"🚀 Starting parallel execution of {len(tasks)} notebooks...", "")
+            log(f"🚀 Starting staggered parallel execution ({len(tasks)} notebooks, 2s interval)...", "")
             log("═" * 70, "")
             
             results = {}
