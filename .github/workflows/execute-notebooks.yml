@@ -30,7 +30,6 @@ jobs:
         import json
         import sys
         from datetime import datetime
-        from pathlib import Path
         import shutil
         import time
 
@@ -93,17 +92,17 @@ jobs:
             sys.stdout.flush()
 
         def setup_kaggle_auth(account):
-            kaggle_dir = Path.home() / ".kaggle"
-            kaggle_dir.mkdir(exist_ok=True)
-            kaggle_json = kaggle_dir / "kaggle.json"
+            kaggle_dir = os.path.join(os.path.expanduser("~"), ".kaggle")
+            os.makedirs(kaggle_dir, exist_ok=True)
+            kaggle_json = os.path.join(kaggle_dir, "kaggle.json")
             with open(kaggle_json, 'w') as f:
                 json.dump({"username": account["username"], "key": account["key"]}, f)
-            kaggle_json.chmod(0o600)
+            os.chmod(kaggle_json, 0o600)
             log(f"Auth set: {account['username']}", "🔑")
 
-        def run_cmd(cmd, timeout=180):
+        def run_cmd(cmd, timeout=180, cwd=None):
             try:
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, cwd=cwd)
                 return result.returncode == 0, result.stdout, result.stderr
             except subprocess.TimeoutExpired:
                 return False, "", "Timeout"
@@ -144,22 +143,23 @@ jobs:
             log(f"START: {notebook_name} → {account['username']}", "🚀")
             log(f"  Redis: {redis_url.split('//')[1].split('.')[0]}", "🔗")
             
-            source_dir = Path(f"./source_{notebook_name}_{account['username']}")
-            dest_dir = Path(f"./dest_{notebook_name}_{account['username']}")
-            original_dir = os.getcwd()
+            # Use absolute paths for thread safety
+            base_dir = os.getcwd()
+            source_dir = os.path.join(base_dir, f"source_{notebook_name}_{account['username']}")
+            dest_dir = os.path.join(base_dir, f"dest_{notebook_name}_{account['username']}")
             
             try:
                 # Clean directories
                 for d in [source_dir, dest_dir]:
-                    if d.exists():
+                    if os.path.exists(d):
                         shutil.rmtree(d)
-                    d.mkdir()
+                    os.makedirs(d)
                 
                 # STEP 1: Load base notebook from repo
                 log(f"Loading base notebook template...", "📂")
-                base_notebook_path = Path("server-4.ipynb")
+                base_notebook_path = os.path.join(base_dir, "server-4.ipynb")
                 
-                if not base_notebook_path.exists():
+                if not os.path.exists(base_notebook_path):
                     log(f"ERROR: server-4.ipynb not found in repository!", "❌")
                     return False
                 
@@ -183,7 +183,7 @@ jobs:
                     log(f"Notebook exists - UPDATE mode", "✅")
                     
                     # Use destination's metadata (has correct id_no)
-                    dest_metadata_file = dest_dir / "kernel-metadata.json"
+                    dest_metadata_file = os.path.join(dest_dir, "kernel-metadata.json")
                     with open(dest_metadata_file, 'r', encoding='utf-8') as f:
                         metadata = json.load(f)
                     
@@ -191,7 +191,7 @@ jobs:
                     
                     # Save modified notebook to dest directory
                     dest_notebook_name = metadata.get('code_file', f"{notebook_name}.ipynb")
-                    with open(dest_dir / dest_notebook_name, 'w', encoding='utf-8') as f:
+                    with open(os.path.join(dest_dir, dest_notebook_name), 'w', encoding='utf-8') as f:
                         json.dump(notebook_data, f, indent=2)
                     
                     # Update metadata if needed
@@ -221,26 +221,26 @@ jobs:
                     }
                     
                     # Save notebook and metadata to source directory
-                    with open(source_dir / f"{notebook_name}.ipynb", 'w', encoding='utf-8') as f:
+                    with open(os.path.join(source_dir, f"{notebook_name}.ipynb"), 'w', encoding='utf-8') as f:
                         json.dump(notebook_data, f, indent=2)
                     
-                    with open(source_dir / "kernel-metadata.json", 'w', encoding='utf-8') as f:
+                    with open(os.path.join(source_dir, "kernel-metadata.json"), 'w', encoding='utf-8') as f:
                         json.dump(metadata, f, indent=2)
                     
                     log(f"New kernel metadata: id={metadata['id']}, slug={metadata.get('slug', notebook_name)}", "📝")
                     push_dir = source_dir
                 
-                # STEP 4: Push to Kaggle
+                # STEP 4: Push to Kaggle (using cwd parameter - THREAD SAFE!)
                 setup_kaggle_auth(account)
                 time.sleep(0.3)
                 
-                os.chdir(push_dir)
-                log(f"Directory contents: {[f.name for f in Path('.').glob('*')]}", "📂")
+                # List directory contents
+                dir_contents = [f for f in os.listdir(push_dir)]
+                log(f"Directory contents: {dir_contents}", "📂")
                 
                 log(f"Pushing to Kaggle...", "📤")
-                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240)
-                
-                os.chdir(original_dir)
+                # CRITICAL: Use cwd parameter instead of os.chdir() for thread safety
+                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=push_dir)
                 
                 if not success:
                     log(f"PUSH FAILED", "❌")
@@ -259,11 +259,13 @@ jobs:
                 return False
                 
             finally:
-                if os.getcwd() != original_dir:
-                    os.chdir(original_dir)
+                # Cleanup - no need to change directory
                 for d in [source_dir, dest_dir]:
-                    if d.exists():
-                        shutil.rmtree(d, ignore_errors=True)
+                    if os.path.exists(d):
+                        try:
+                            shutil.rmtree(d)
+                        except:
+                            pass  # Ignore cleanup errors
 
         # ========================================
         # PARALLEL EXECUTION WORKER
