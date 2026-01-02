@@ -1,0 +1,371 @@
+name: Kaggle Notebook Executor
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [cron-trigger]
+
+jobs:
+  execute-notebooks:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install kaggle
+    
+    - name: Execute notebooks
+      run: |
+        python << 'PYEOF'
+        import os
+        import subprocess
+        import json
+        import sys
+        from datetime import datetime
+        from pathlib import Path
+        import shutil
+        import time
+
+        # ========================================
+        # REDIS POOL (10 instances)
+        # ========================================
+        REDIS_POOL = [
+            ("https://fair-drake-18300.upstash.io", "AUd8AAIncDE4ZGIzNjkzNjk0N2I0MDZhYjQzNWI4ZmQzMTIxZmViNnAxMTgzMDA"),
+            ("https://learning-alpaca-18314.upstash.io", "AUeKAAIncDFkMmU5NTUxNTQwZWU0NjkwYmYwYjFlYmExYzE3YmUwNHAxMTgzMTQ"),
+            ("https://moved-grouper-18341.upstash.io", "AUelAAIncDFiODAzNDQ4ZjY5YTE0YThhODg0NzEwZTNiOWI4OGFkZXAxMTgzNDE"),
+            ("https://ace-spaniel-18358.upstash.io", "AUe2AAIncDFlNjA3NjY2MWUzMGI0MDc3YWM3NWIyZDY4OTE5MDAzYXAxMTgzNTg"),
+            ("https://wondrous-lab-18392.upstash.io", "AUfYAAIncDE0YmY3MWZmYmY1MmU0NzdmYTg2MzM0ODk1MzdiMjIxMXAxMTgzOTI"),
+            ("https://native-lamprey-11246.upstash.io", "ASvuAAIncDIwMjZhNjljYTQwMGM0MDM5OGE3ZWFlMDZiNGNjYWYyMnAyMTEyNDY"),
+            ("https://harmless-humpback-11251.upstash.io", "ASvzAAIncDI1ZDM4ZmU3YTY4NDE0NDE1YmUxYzY1NjQzNTk5Yjg1YnAyMTEyNTE"),
+            ("https://game-gobbler-11253.upstash.io", "ASv1AAIncDIwM2VmMjI0ODNhNWQ0NjYwOTgxMDU4ZDMxMGRlZDFhNHAyMTEyNTM"),
+            ("https://fond-doberman-11259.upstash.io", "ASv7AAIncDJmZThiNzIwNGQ0ZWM0NzE0ODA3YzAxODY0NWEzNGM4Y3AyMTEyNTk"),
+            ("https://absolute-redfish-9172.upstash.io", "ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg")
+        ]
+
+        # ========================================
+        # WEEKLY SCHEDULE
+        # ========================================
+        WEEKLY_SCHEDULE = {
+            "Friday": [
+                {"username": "shreevathsaz", "key": "2faa3199cb4f8a0d88a8999604ac6770"},
+                {"username": "shreevathsamm", "key": "c625e9fd87ba7e4fe40312e5391feb60"}
+            ],
+            "Saturday": [
+                {"username": "vathsamm", "key": "33fad3a4dc6d92aa70fa90b62b9ebef4"},
+                {"username": "svproeditor", "key": "dee169dffee0cc31fffe2a30a4bb01a8"}
+            ],
+            "Sunday": [
+                {"username": "yamanya", "key": "6a8da12facf5fbcc820cd00baa788a99"},
+                {"username": "yamunappacom", "key": "d34212355d722ee3c75b8b6e06e2ce87"}
+            ],
+            "Monday": [
+                {"username": "vaishakha98", "key": "4240e8c91b5cd8537de55bad47554b5e"},
+                {"username": "riocom", "key": "79898aeec842d5ef19dd7acbd0c7f356"}
+            ],
+            "Tuesday": [
+                {"username": "leommmmm", "key": "c88472f292e5de46c97952906d79c896"}
+                # Account 10: PENDING - Add when available
+            ],
+            "Wednesday": [
+                # Account 11: PENDING
+                # Account 12: PENDING
+            ],
+            "Thursday": [
+                # Account 13: PENDING
+                # Account 14: PENDING
+            ]
+        }
+
+        # ========================================
+        # HELPER FUNCTIONS
+        # ========================================
+        def log(msg, symbol="ℹ️"):
+            timestamp = datetime.utcnow().strftime('%H:%M:%S')
+            print(f"[{timestamp}] {symbol} {msg}")
+            sys.stdout.flush()
+
+        def setup_kaggle_auth(account):
+            kaggle_dir = Path.home() / ".kaggle"
+            kaggle_dir.mkdir(exist_ok=True)
+            kaggle_json = kaggle_dir / "kaggle.json"
+            with open(kaggle_json, 'w') as f:
+                json.dump({"username": account["username"], "key": account["key"]}, f)
+            kaggle_json.chmod(0o600)
+            log(f"Auth set: {account['username']}", "🔑")
+
+        def run_cmd(cmd, timeout=180):
+            try:
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+                return result.returncode == 0, result.stdout, result.stderr
+            except subprocess.TimeoutExpired:
+                return False, "", "Timeout"
+            except Exception as e:
+                return False, "", str(e)
+
+        def inject_redis_credentials(notebook_json, redis_url, redis_token):
+            """Inject Redis credentials into the notebook code"""
+            for cell in notebook_json.get('cells', []):
+                if cell.get('cell_type') == 'code':
+                    source = cell.get('source', [])
+                    
+                    # Convert to string if it's a list
+                    if isinstance(source, list):
+                        source_code = ''.join(source)
+                    else:
+                        source_code = source
+                    
+                    # Replace URL
+                    source_code = source_code.replace(
+                        'UPSTASH_REDIS_REST_URL = "https://absolute-redfish-9172.upstash.io"',
+                        f'UPSTASH_REDIS_REST_URL = "{redis_url}"'
+                    )
+                    
+                    # Replace Token
+                    source_code = source_code.replace(
+                        'UPSTASH_REDIS_REST_TOKEN = "ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg"',
+                        f'UPSTASH_REDIS_REST_TOKEN = "{redis_token}"'
+                    )
+                    
+                    # Convert back to list format (preserving newlines)
+                    cell['source'] = source_code
+                    break
+            
+            return notebook_json
+
+        def execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token):
+            log(f"START: {notebook_name} → {account['username']}", "🚀")
+            log(f"  Redis: {redis_url.split('//')[1].split('.')[0]}", "🔗")
+            
+            source_dir = Path(f"./source_{notebook_name}_{account['username']}")
+            dest_dir = Path(f"./dest_{notebook_name}_{account['username']}")
+            original_dir = os.getcwd()
+            
+            try:
+                # Clean directories
+                for d in [source_dir, dest_dir]:
+                    if d.exists():
+                        shutil.rmtree(d)
+                    d.mkdir()
+                
+                # STEP 1: Load base notebook from repo
+                log(f"Loading base notebook template...", "📂")
+                base_notebook_path = Path("server-4.ipynb")
+                
+                if not base_notebook_path.exists():
+                    log(f"ERROR: server-4.ipynb not found in repository!", "❌")
+                    return False
+                
+                with open(base_notebook_path, 'r', encoding='utf-8') as f:
+                    notebook_data = json.load(f)
+                
+                # STEP 2: Inject Redis credentials
+                log(f"Injecting Redis credentials...", "💉")
+                notebook_data = inject_redis_credentials(notebook_data, redis_url, redis_token)
+                
+                # STEP 3: Check if destination notebook exists
+                setup_kaggle_auth(account)
+                time.sleep(0.3)
+                
+                log(f"Checking if notebook exists: {dest_slug}...", "🔍")
+                success, stdout, stderr = run_cmd(f"kaggle kernels pull {dest_slug} -p {dest_dir} -m")
+                
+                dest_exists = success
+                
+                if dest_exists:
+                    log(f"Notebook exists - UPDATE mode", "✅")
+                    
+                    # Use destination's metadata (has correct id_no)
+                    dest_metadata_file = dest_dir / "kernel-metadata.json"
+                    with open(dest_metadata_file, 'r', encoding='utf-8') as f:
+                        metadata = json.load(f)
+                    
+                    log(f"Using existing metadata: id={metadata.get('id')}, id_no={metadata.get('id_no')}", "📝")
+                    
+                    # Save modified notebook to dest directory
+                    dest_notebook_name = metadata.get('code_file', f"{notebook_name}.ipynb")
+                    with open(dest_dir / dest_notebook_name, 'w', encoding='utf-8') as f:
+                        json.dump(notebook_data, f, indent=2)
+                    
+                    # Update metadata if needed
+                    metadata['code_file'] = dest_notebook_name
+                    with open(dest_metadata_file, 'w', encoding='utf-8') as f:
+                        json.dump(metadata, f, indent=2)
+                    
+                    push_dir = dest_dir
+                    
+                else:
+                    log(f"Notebook doesn't exist - CREATE mode", "🆕")
+                    
+                    # Create new metadata
+                    metadata = {
+                        "id": dest_slug,
+                        "title": notebook_name,
+                        "code_file": f"{notebook_name}.ipynb",
+                        "language": "python",
+                        "kernel_type": "notebook",
+                        "is_private": True,
+                        "enable_gpu": True,
+                        "enable_internet": True,
+                        "enable_tpu": False,
+                        "dataset_sources": [],
+                        "kernel_sources": [],
+                        "competition_sources": []
+                    }
+                    
+                    # Save notebook and metadata to source directory
+                    with open(source_dir / f"{notebook_name}.ipynb", 'w', encoding='utf-8') as f:
+                        json.dump(notebook_data, f, indent=2)
+                    
+                    with open(source_dir / "kernel-metadata.json", 'w', encoding='utf-8') as f:
+                        json.dump(metadata, f, indent=2)
+                    
+                    log(f"New kernel metadata: id={metadata['id']}, slug={metadata.get('slug', notebook_name)}", "📝")
+                    push_dir = source_dir
+                
+                # STEP 4: Push to Kaggle
+                setup_kaggle_auth(account)
+                time.sleep(0.3)
+                
+                os.chdir(push_dir)
+                log(f"Directory contents: {[f.name for f in Path('.').glob('*')]}", "📂")
+                
+                log(f"Pushing to Kaggle...", "📤")
+                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240)
+                
+                os.chdir(original_dir)
+                
+                if not success:
+                    log(f"PUSH FAILED", "❌")
+                    log(f"Stderr: {stderr[:500]}", "")
+                    log(f"Stdout: {stdout[:500]}", "")
+                    return False
+                
+                log(f"Push OK: {notebook_name}", "✅")
+                log(f"URL: https://www.kaggle.com/code/{dest_slug}", "🔗")
+                return True
+                
+            except Exception as e:
+                log(f"EXCEPTION: {str(e)}", "❌")
+                import traceback
+                traceback.print_exc()
+                return False
+                
+            finally:
+                if os.getcwd() != original_dir:
+                    os.chdir(original_dir)
+                for d in [source_dir, dest_dir]:
+                    if d.exists():
+                        shutil.rmtree(d, ignore_errors=True)
+
+        # ========================================
+        # MAIN EXECUTION
+        # ========================================
+        def execute_all():
+            start = datetime.utcnow()
+            
+            # Detect current day
+            current_day = datetime.utcnow().strftime('%A')
+            
+            log("═" * 70, "")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - WEEKLY SCHEDULE", "🚀")
+            log("═" * 70, "")
+            log(f"Current Day: {current_day}", "📅")
+            log(f"Execution Time: {start.isoformat()}", "🕐")
+            
+            # Check if day has configuration
+            if current_day not in WEEKLY_SCHEDULE:
+                log(f"ERROR: {current_day} not in schedule!", "❌")
+                sys.exit(1)
+            
+            accounts_today = WEEKLY_SCHEDULE[current_day]
+            
+            # Check if day has accounts
+            if not accounts_today:
+                log(f"⚠️ No accounts configured for {current_day}. Skipping execution.", "⏭️")
+                log("Please add account credentials for this day in the workflow configuration.", "")
+                sys.exit(0)
+            
+            log(f"Accounts scheduled: {len(accounts_today)}", "👥")
+            log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
+            log("═" * 70, "")
+            
+            results = {}
+            redis_index = 0
+            
+            # Calculate starting Redis index based on day
+            day_order = ["Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
+            if current_day in day_order:
+                day_position = day_order.index(current_day)
+                # Each day before today used 4 Redis slots (2 accounts × 2 notebooks)
+                # Except Tuesday which might use only 2
+                redis_index = day_position * 4
+            
+            for account_idx, account in enumerate(accounts_today):
+                log("", "")
+                log("─" * 70, "")
+                log(f"ACCOUNT {account_idx + 1}/{len(accounts_today)}: {account['username']}", "👤")
+                log("─" * 70, "")
+                
+                # Execute server-1 and server-2 for this account
+                for notebook_name in ["server-1", "server-2"]:
+                    dest_slug = f"{account['username']}/{notebook_name}"
+                    
+                    # Get Redis credentials from pool (cycling)
+                    redis_url, redis_token = REDIS_POOL[redis_index % len(REDIS_POOL)]
+                    redis_index += 1
+                    
+                    log("", "")
+                    result_key = f"{account['username']}/{notebook_name}"
+                    success = execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token)
+                    results[result_key] = success
+                    
+                    if success:
+                        log(f"✅ {notebook_name} completed successfully", "")
+                    else:
+                        log(f"❌ {notebook_name} failed", "")
+                    
+                    # Wait between notebooks
+                    if notebook_name == "server-1":  # Wait before server-2
+                        log("Waiting 60 seconds before next notebook...", "⏳")
+                        time.sleep(60)
+                
+                # Wait between accounts
+                if account_idx < len(accounts_today) - 1:
+                    log("Waiting 60 seconds before next account...", "⏳")
+                    time.sleep(60)
+            
+            # Summary
+            success_count = sum(results.values())
+            duration = (datetime.utcnow() - start).total_seconds()
+            
+            log("", "")
+            log("═" * 70, "")
+            log(f"EXECUTION SUMMARY", "🏁")
+            log("═" * 70, "")
+            log(f"Day: {current_day}", "📅")
+            log(f"Total Time: {duration:.1f}s ({duration/60:.1f} min)", "⏱️")
+            log(f"Success: {success_count}/{len(results)}", "📊")
+            log("", "")
+            
+            for nb_name, success in results.items():
+                status = "✅" if success else "❌"
+                log(f"{status} {nb_name}", "")
+            
+            log("═" * 70, "")
+            
+            if success_count < len(results):
+                log(f"⚠️ {len(results) - success_count} notebook(s) failed", "")
+                sys.exit(1)
+            else:
+                log("🎉 All notebooks executed successfully!", "")
+
+        execute_all()
+        PYEOF
