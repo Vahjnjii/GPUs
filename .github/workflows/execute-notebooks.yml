@@ -1,4 +1,4 @@
-name: Kaggle Notebook Executor.....
+name: Kaggle Notebook Executor - V4 Final
 
 on:
   workflow_dispatch:
@@ -22,36 +22,25 @@ jobs:
       run: |
         pip install kaggle
     
-    - name: Execute notebooks
+    - name: Execute Notebooks
       run: |
         python << 'PYEOF'
         import os
         import subprocess
         import json
         import sys
+        import time
         from datetime import datetime
         import shutil
-        import time
 
-        # ========================================
-        # REDIS POOL (10 instances)
-        # ========================================
-        REDIS_POOL = [
-            ("https://fair-drake-18300.upstash.io", "AUd8AAIncDE4ZGIzNjkzNjk0N2I0MDZhYjQzNWI4ZmQzMTIxZmViNnAxMTgzMDA"),
-            ("https://learning-alpaca-18314.upstash.io", "AUeKAAIncDFkMmU5NTUxNTQwZWU0NjkwYmYwYjFlYmExYzE3YmUwNHAxMTgzMTQ"),
-            ("https://moved-grouper-18341.upstash.io", "AUelAAIncDFiODAzNDQ4ZjY5YTE0YThhODg0NzEwZTNiOWI4OGFkZXAxMTgzNDE"),
-            ("https://ace-spaniel-18358.upstash.io", "AUe2AAIncDFlNjA3NjY2MWUzMGI0MDc3YWM3NWIyZDY4OTE5MDAzYXAxMTgzNTg"),
-            ("https://wondrous-lab-18392.upstash.io", "AUfYAAIncDE0YmY3MWZmYmY1MmU0NzdmYTg2MzM0ODk1MzdiMjIxMXAxMTgzOTI"),
-            ("https://native-lamprey-11246.upstash.io", "ASvuAAIncDIwMjZhNjljYTQwMGM0MDM5OGE3ZWFlMDZiNGNjYWYyMnAyMTEyNDY"),
-            ("https://harmless-humpback-11251.upstash.io", "ASvzAAIncDI1ZDM4ZmU3YTY4NDE0NDE1YmUxYzY1NjQzNTk5Yjg1YnAyMTEyNTE"),
-            ("https://game-gobbler-11253.upstash.io", "ASv1AAIncDIwM2VmMjI0ODNhNWQ0NjYwOTgxMDU4ZDMxMGRlZDFhNHAyMTEyNTM"),
-            ("https://fond-doberman-11259.upstash.io", "ASv7AAIncDJmZThiNzIwNGQ0ZWM0NzE0ODA3YzAxODY0NWEzNGM4Y3AyMTEyNTk"),
-            ("https://absolute-redfish-9172.upstash.io", "ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg")
-        ]
+        # ==============================================================================
+        #  CONFIGURATION
+        # ==============================================================================
+        
+        # We only want these 4 servers
+        TARGET_SERVERS = ["server_1", "server_2", "server_3", "server_4"]
 
-        # ========================================
-        # WEEKLY SCHEDULE
-        # ========================================
+        # Your Weekly Schedule
         WEEKLY_SCHEDULE = {
             "Friday": [
                 {"username": "shreevathsaz", "key": "2faa3199cb4f8a0d88a8999604ac6770"},
@@ -71,17 +60,852 @@ jobs:
             ],
             "Tuesday": [
                 {"username": "leommmmm", "key": "c88472f292e5de46c97952906d79c896"}
-                # Account 10: PENDING - Add when available
             ],
-            "Wednesday": [
-                # Account 11: PENDING
-                # Account 12: PENDING
-            ],
-            "Thursday": [
-                # Account 13: PENDING
-                # Account 14: PENDING
-            ]
+            "Wednesday": [],
+            "Thursday": []
         }
+
+        # ==============================================================================
+        #  BASE CODE (The Firebase Script)
+        # ==============================================================================
+        BASE_CODE = r'''#!/usr/bin/env python3
+        # ==============================================================================
+        # GPU SERVER - FIREBASE EDITION (PARALLEL GPU CORES)
+        # VERSION: 2.3 - EACH GPU CORE WORKS INDEPENDENTLY IN PARALLEL
+        # ==============================================================================
+        import subprocess
+        import sys
+        import os
+        import time
+        import uuid
+        import threading
+        import json
+        import random
+        import math
+        import urllib.request
+        import logging
+        import shutil
+        from datetime import datetime, timedelta, timezone
+
+        # ============================================================================
+        # CRITICAL: CHANGE THIS FOR EACH GPU SERVER
+        # ============================================================================
+        SERVER_ID = "server_1"  # ← Change to: server_1, server_2, server_3, or server_4
+        # ============================================================================
+
+        # Optimize Memory
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+
+        # ------------------------------------------
+        # CONFIGURATION
+        # ------------------------------------------
+        R2_ACCOUNT_ID = "4fa19e788a951ba2d879c18782ef8bf0"
+        R2_ACCESS_KEY_ID = "d66adcff67ac5b4eca609a662b80e742"
+        R2_SECRET_ACCESS_KEY = "1a10aca3049c176d85cf3ec3c4e4ae8c6b715a4d9b1e67a79acc8b94d3b3c660"
+        R2_BUCKET_NAME = "video-generation-storage"
+        R2_ENDPOINT_URL = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+        # FIREBASE CONFIGURATION
+        FIREBASE_DATABASE_URL = "https://kaggle-a46bc-default-rtdb.firebaseio.com"
+        FIREBASE_CRED = {
+            "type": "service_account",
+            "project_id": "kaggle-a46bc",
+            "private_key_id": "191892b58b5cf421cc840d1f3d316b02c690331f",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDC4dZUvVB7Kg/I\nu0qLuy0JRvqSM7Jy66jytfAE8zzOThVcyVSozOjiQQutiirYLO5P96oDp7hPsNJe\nzDDwMXvm5hjZn9pw3JsIZo9Es37R69vTnI1TMQmPqoFkUu+4JEpdbuyGYNJRpWSw\nuVy5rh1lVbGboFUduyVdUWZV1JfLGgzMMqaMYHcX2RdFQWqY7xQFiKmOYiNiDCxj\n1BRWyouOGRGEXTugFEWNHfAkjS3ohjpkgFeNcVn7DVixQRtqP0894mcbgzqYXMGH\nR6OuElzIfww+Lwm6rDFAVUeQcC6/mnMTjpF5c3/WGZBPheFu5l1yK3M1Ccd/wVQP\nXYXtfL+9AgMBAAECggEANLuSWPSvIdykT78qMTwxOAjuRYBaoZEV8rL7YwOEaRik\n3CoYT+K+g3ZxWACCjmM+CwJrjTilfV7N1dvvxBbHvZd2kvCX1aFEDBZgXwko4Fmv\nboe2kBO9UBQllgWBGzUqsDSTKNtrHa+g2tcVeaLdDm4NNJzCW1yoBCPCCqiPeGO3\nfOf4dG+tmlIbS2E+yHx2D0LQwUFUDUI6pMOs04ZH5itUFFsS2xCvA5s/iup1ALOO\nh7oSUvq0dqvM8RKWzl3J6oq1B2f+v27GvAQng8IAg0BIQIWTrkLQtRpA3Kcgs8FD\nUrOrpnNpDfIRzY2euU6XY4L+Qe45OukM9LulUuNl6wKBgQDup0k3nPOtzhkzoU4a\nxV/1bOOBPmreyHfFtzUseTsEjfBIoqT8Vd4kiuARvU4/qF+x3J2vealMefm0fkGX\nT51NpiLBf8hMjn2IvkFgMXY1wXRG8rSB2LTj9DFVAJyjMAar3lpKNnuTEUFoBNeG\nimkJUl13tveAEvwIKmejvNa2XwKBgQDRDBUlvTUilsMqHfDeqrWBCf+BMYp5ZBVN\nFi+uvyoJVhuSfABz6981e2JpRlp/TthwTZz5NOPQXM11mg5SZPvdr48XLnqB1bx1\nJvX44g0aSLxgTcE4gkjZ4hZVvPmWA6De1TDWaCII08imS09mB+sGTGuvIJsojTnT\nTod2TWxnYwKBgQC8NwaRa6DqxA4wH9kfV+ZUAqpyNa3HQcbkEZdIGdwnvWFxh4Qi\n1f26SCRrGSdrIPlHprxdtc+FVvVOGfzUvp9Kq+nhPUvUxNPQUmvw11FpF8cCZUti\n1GvlE6MMbM0cDjZUuanvuYQ/+m3hAWCQ5PvttB2u2ofbZB2MuxS9l6KmdQKBgGBc\n03q8BzxUhs5pUtkxk81R0Ie7UHu4mOEZ8wz4beYz3S3fH05QUmoS4EBq/9hjff32\nqP9vU/x+au9k/mkYx8le3fTvpeUno2HVfdkmSqftE3jJHuJvnCljwKvxGpP+RC+z\n0nljMx0ikwGlAYqk57/VhmYJ/7vnrdor/uGXuvrFAoGAfjHZKgltBut4sNhwtsZb\nmc+dvG5nAwzjRWMjFRsb5VSEULvZg7Ie2SluUTF/AnmEdl4bswCnwIeEOZ/m3erm\naMt1jSsScXZ8ajOf0JsvvJPbvWDVv605FX8VbFo+Ia7I8jijEDXywttRrnP3vS/D\nfw35PW2kl32uZInbsjs6qMw=\n-----END PRIVATE KEY-----\n",
+            "client_email": "firebase-adminsdk-fbsvc@kaggle-a46bc.iam.gserviceaccount.com",
+            "client_id": "101959841653008750303",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40kaggle-a46bc.iam.gserviceaccount.com",
+            "universe_domain": "googleapis.com"
+        }
+
+        # ------------------------------------------
+        # DEPENDENCY CHECK
+        # ------------------------------------------
+        def install_if_missing(package, import_name=None):
+            if import_name is None:
+                import_name = package
+            try:
+                __import__(import_name)
+            except ImportError:
+                print(f"⬇️ Installing {package}...")
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", package])
+
+        if shutil.which('ffmpeg') is None:
+            print("Installing FFmpeg...")
+            subprocess.run(["apt-get", "update"], stdout=subprocess.DEVNULL)
+            subprocess.run(["apt-get", "install", "-y", "ffmpeg"], stdout=subprocess.DEVNULL)
+
+        install_if_missing("boto3")
+        install_if_missing("firebase-admin", "firebase_admin")
+        install_if_missing("openai-whisper", "whisper")
+        install_if_missing("moviepy")
+        install_if_missing("unidecode")
+        install_if_missing("Pillow", "PIL")
+
+        try:
+            import diffusers
+            import transformers
+            import accelerate
+        except ImportError:
+            print("⬇️ Installing AI Libraries...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "diffusers", "transformers", "accelerate", "safetensors", "xformers"])
+
+        # ------------------------------------------
+        # IMPORTS
+        # ------------------------------------------
+        import torch
+        from diffusers import StableDiffusionXLPipeline, EulerDiscreteScheduler, AutoencoderKL
+        import boto3
+        from botocore.config import Config
+        import firebase_admin
+        from firebase_admin import credentials, db
+        import whisper
+        from PIL import Image, ImageFont, ImageDraw
+
+        # ------------------------------------------
+        # FIREBASE INITIALIZATION
+        # ------------------------------------------
+        print("🔧 Initializing Firebase...")
+        try:
+            try:
+                app = firebase_admin.get_app()
+                print("✅ Firebase already initialized (reusing connection)")
+            except ValueError:
+                cred = credentials.Certificate(FIREBASE_CRED)
+                firebase_admin.initialize_app(cred, {
+                    'databaseURL': FIREBASE_DATABASE_URL
+                })
+                print(f"✅ Firebase initialized: {SERVER_ID}")
+            
+            test_ref = db.reference(f'/servers/{SERVER_ID}/heartbeat')
+            test_ref.set({
+                'timestamp': time.time(),
+                'status': 'initializing',
+                'server_id': SERVER_ID
+            })
+            print(f"✅ Firebase connection verified for {SERVER_ID}")
+            
+        except Exception as e:
+            print(f"❌ Firebase init failed: {e}")
+            sys.exit(1)
+
+        # ------------------------------------------
+        # FONT MANAGEMENT
+        # ------------------------------------------
+        FONT_DIR = "./fonts"
+        SUBTITLE_FONTS = {}
+
+        FONT_CONFIG = {
+            'latin': {'file': 'NotoSans-Bold.ttf', 'url': 'https://github.com/notofonts/notofonts.github.io/raw/main/fonts/NotoSans/hinted/ttf/NotoSans-Bold.ttf', 'family_name': 'Noto Sans', 'weight': 'Bold'},
+            'devanagari': {'file': 'NotoSansDevanagari-Bold.ttf', 'url': 'https://github.com/notofonts/notofonts.github.io/raw/main/fonts/NotoSansDevanagari/hinted/ttf/NotoSansDevanagari-Bold.ttf', 'family_name': 'Noto Sans Devanagari', 'weight': 'Bold'},
+            'arabic': {'file': 'NotoSansArabic-Bold.ttf', 'url': 'https://github.com/notofonts/notofonts.github.io/raw/main/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Bold.ttf', 'family_name': 'Noto Sans Arabic', 'weight': 'Bold'},
+            'cjk': {'file': 'NotoSansCJKsc-Bold.otf', 'url': 'https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf', 'family_name': 'Noto Sans CJK SC', 'weight': 'Bold'}
+        }
+
+        def setup_fonts():
+            if not os.path.exists(FONT_DIR):
+                os.makedirs(FONT_DIR)
+            print("⬇️ Setting up fonts...")
+            for script, config in FONT_CONFIG.items():
+                path = os.path.join(FONT_DIR, config['file'])
+                if not os.path.exists(path):
+                    try:
+                        urllib.request.urlretrieve(config['url'], path)
+                    except Exception as e:
+                        print(f"❌ Font download failed ({script}): {e}")
+                        continue
+                if os.path.exists(path):
+                    SUBTITLE_FONTS[script] = path
+
+        setup_fonts()
+
+        # ------------------------------------------
+        # SUBTITLE ENGINE (keeping same as before)
+        # ------------------------------------------
+        def detect_script(text):
+            if not text or not text.strip(): return 'latin'
+            counts = {'devanagari': 0, 'arabic': 0, 'cjk': 0, 'latin': 0}
+            for char in text:
+                code = ord(char)
+                if 0x0900 <= code <= 0x0DFF: counts['devanagari'] += 1
+                elif 0x0600 <= code <= 0x077F: counts['arabic'] += 1
+                elif 0x4E00 <= code <= 0x9FFF or 0x3040 <= code <= 0x30FF: counts['cjk'] += 1
+                else: counts['latin'] += 1
+            max_script = max(counts.items(), key=lambda x: x[1])
+            return max_script[0] if max_script[1] > 0 else 'latin'
+
+        def get_font_for_text(text):
+            script = detect_script(text)
+            mapping = {'devanagari': 'devanagari', 'arabic': 'arabic', 'cjk': 'cjk'}
+            key = mapping.get(script, 'latin')
+            if key in SUBTITLE_FONTS:
+                return SUBTITLE_FONTS[key], FONT_CONFIG[key], script
+            return SUBTITLE_FONTS.get('latin'), FONT_CONFIG.get('latin'), 'latin'
+
+        def time_to_ass(seconds):
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            cs = int((seconds % 1) * 100)
+            return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+        def calculate_text_width(text, font_path, font_size):
+            try:
+                font = ImageFont.truetype(font_path, font_size)
+                dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+                bbox = dummy.textbbox((0, 0), text, font=font)
+                return bbox[2] - bbox[0]
+            except:
+                return len(text) * font_size * 0.6
+
+        def create_ass_event_for_page(page_lines, font_size, events, is_cjk, is_latin):
+            if not page_lines: return
+            start_time = page_lines[0][0]['start']
+            end_time = page_lines[-1][-1]['end']
+            
+            def process_word(word_obj):
+                raw = word_obj.get('word', '').strip()
+                return raw.upper() if is_latin else raw
+            
+            separator = '' if is_cjk else ' '
+            full_text_lines = [separator.join([process_word(w) for w in line]) for line in page_lines]
+            full_text = '\\N'.join(full_text_lines)
+            
+            events.append(f"Dialogue: 0,{time_to_ass(start_time)},{time_to_ass(end_time)},BG,,0,0,0,,{{\\bord15\\shad0\\1c&H000000&\\1a&H4D&}}{full_text}")
+            
+            for line_idx, line in enumerate(page_lines):
+                for word_idx, word_obj in enumerate(line):
+                    w_start = word_obj.get('start', start_time)
+                    w_end = word_obj.get('end', end_time)
+                    highlight_lines = []
+                    for l_idx, l in enumerate(page_lines):
+                        line_words = []
+                        for w_idx, w in enumerate(l):
+                            disp = process_word(w)
+                            if l_idx == line_idx and w_idx == word_idx:
+                                line_words.append(f"{{\\bord8\\3c&HD30093&\\3a&H4D&\\shad2\\4c&H000000&\\4a&H00&}}{disp}{{\\bord0\\shad0}}")
+                            else:
+                                line_words.append(disp)
+                        highlight_lines.append(separator.join(line_words))
+                    hl_text = '\\N'.join(highlight_lines)
+                    events.append(f"Dialogue: 1,{time_to_ass(w_start)},{time_to_ass(w_end)},PurpleBG,,0,0,0,,{hl_text}")
+            
+            events.append(f"Dialogue: 2,{time_to_ass(start_time)},{time_to_ass(end_time)},Default,,0,0,0,,{full_text}")
+            
+            for line_idx, line in enumerate(page_lines):
+                for word_idx, word_obj in enumerate(line):
+                    w_start = word_obj.get('start', start_time)
+                    w_end = word_obj.get('end', end_time)
+                    top_lines = []
+                    for l_idx, l in enumerate(page_lines):
+                        line_words = []
+                        for w_idx, w in enumerate(l):
+                            disp = process_word(w)
+                            if l_idx == line_idx and w_idx == word_idx:
+                                line_words.append(f"{{\\c&HFFFFFF&}}{disp}")
+                            else:
+                                line_words.append(disp)
+                        top_lines.append(separator.join(line_words))
+                    joined_top_lines = '\\N'.join(top_lines)
+                    events.append(f"Dialogue: 3,{time_to_ass(w_start)},{time_to_ass(w_end)},Default,,0,0,0,,{joined_top_lines}")
+
+        def generate_clip_ass_subtitles(subtitle_words, width, height, output_file):
+            if not subtitle_words: return False
+            
+            all_text_raw = "".join([w.get('word', '') for w in subtitle_words])
+            font_path, font_config, script = get_font_for_text(all_text_raw)
+            font_family = font_config['family_name']
+            is_cjk = script == 'cjk'
+
+            processed_words = []
+            if is_cjk:
+                for w in subtitle_words:
+                    text = w.get('word', '').strip()
+                    start = w.get('start', 0)
+                    end = w.get('end', 0)
+                    duration = end - start
+                    length = len(text)
+                    if length > 1:
+                        char_duration = duration / length
+                        for i, char in enumerate(text):
+                            char_start = start + (i * char_duration)
+                            char_end = start + ((i + 1) * char_duration)
+                            processed_words.append({'word': char, 'start': char_start, 'end': char_end})
+                    elif length == 1:
+                        processed_words.append(w)
+            else:
+                processed_words = subtitle_words
+
+            aspect = width / height
+            if aspect < 0.8:
+                ref_h, ref_f, ref_pos, pos_offset = 1280, 63, 0.75, 0
+            elif aspect > 1.5:
+                ref_h, ref_f, ref_pos, pos_offset = 720, 72, 0.85, 38
+            else:
+                ref_h, ref_f, ref_pos, pos_offset = 1080, 68, 0.80, 0
+                
+            font_size = int(ref_f * (height / ref_h))
+            ref_position = int(height * ref_pos) + pos_offset
+            margin_v = height - ref_position
+            
+            header = f"""[Script Info]
+        ScriptType: v4.00+
+        PlayResX: {width}
+        PlayResY: {height}
+        WrapStyle: 0
+        ScaledBorderAndShadow: yes
+        [V4+ Styles]
+        Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+        Style: Default,{font_family},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&HB3000000,-1,0,0,0,100,100,0,0,1,0,0,2,20,20,{margin_v},1
+        Style: BG,{font_family},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&HB3000000,-1,0,0,0,100,100,0,0,1,0,0,2,20,20,{margin_v},1
+        Style: PurpleBG,{font_family},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&HB4D30093,-1,0,0,0,100,100,0,0,1,3,2,2,20,20,{margin_v},1
+        [Events]
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+        """
+            events = []
+            is_latin = script == 'latin'
+            max_line_width = width * 0.90
+            space_width = 0 if is_cjk else int(font_size * 0.25)
+            
+            current_page_lines = []
+            current_line = []
+            current_line_width = 0
+            
+            for word_obj in processed_words:
+                raw = word_obj.get('word', '').strip()
+                disp = raw.upper() if is_latin else raw
+                w_width = calculate_text_width(disp, font_path, font_size) + 10
+                
+                if current_line_width + w_width + space_width > max_line_width:
+                    if current_line: current_page_lines.append(current_line)
+                    if len(current_page_lines) >= 2:
+                        create_ass_event_for_page(current_page_lines, font_size, events, is_cjk, is_latin)
+                        current_page_lines = []
+                    current_line = [word_obj]
+                    current_line_width = w_width + space_width
+                else:
+                    current_line.append(word_obj)
+                    current_line_width += w_width + space_width
+                    
+            if current_line: current_page_lines.append(current_line)
+            if current_page_lines: create_ass_event_for_page(current_page_lines, font_size, events, is_cjk, is_latin)
+            
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(header + "\n".join(events))
+            return True
+
+        # ------------------------------------------
+        # R2 CLIENT
+        # ------------------------------------------
+        print("🔧 Setting up R2...")
+        s3_client = boto3.client(
+            's3',
+            endpoint_url=R2_ENDPOINT_URL,
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            config=Config(signature_version='s3v4'),
+            region_name='auto'
+        )
+        print("✅ R2 ready")
+
+        # ------------------------------------------
+        # FIREBASE HEARTBEAT
+        # ------------------------------------------
+        def heartbeat_worker():
+            print(f"💓 Heartbeat started for {SERVER_ID}...")
+            while True:
+                try:
+                    db.reference(f'/servers/{SERVER_ID}/heartbeat').set({
+                        'timestamp': time.time(),
+                        'status': 'active',
+                        'server_id': SERVER_ID
+                    })
+                    time.sleep(5)
+                except Exception as e:
+                    print(f"💓 Heartbeat error: {e}")
+                    time.sleep(10)
+
+        threading.Thread(target=heartbeat_worker, daemon=True).start()
+
+        # ------------------------------------------
+        # WHISPER MODEL
+        # ------------------------------------------
+        print("⏳ Loading Whisper Model on GPU...")
+        WHISPER_MODEL = whisper.load_model("base", device="cuda")
+        print("✅ Whisper model loaded")
+
+        # ------------------------------------------
+        # TRANSCRIPTION FUNCTIONS (keeping same)
+        # ------------------------------------------
+        def format_time_ref(seconds):
+            m = int(seconds // 60)
+            s = int(seconds % 60)
+            return f"{m:02d}:{s:02d}"
+
+        def create_prompts_txt(raw_result, duration):
+            try:
+                from unidecode import unidecode
+                num_clips = math.ceil(duration / 6.0)
+                bins = [""] * num_clips
+                all_words = []
+                
+                INDIC_LANGS = {'hi', 'bn', 'gu', 'kn', 'ml', 'mr', 'pa', 'ta', 'te', 'ur', 'sd', 'ne'}
+                detected_lang = raw_result.get('language', 'en')
+                should_transliterate = detected_lang in INDIC_LANGS
+                
+                for segment in raw_result['segments']:
+                    if 'words' in segment:
+                        for w in segment['words']:
+                            w_text = unidecode(w['word']) if should_transliterate else w['word']
+                            all_words.append({'word': w_text, 'start': w['start']})
+                
+                if all_words:
+                    for w in all_words:
+                        start = w['start']
+                        idx = int(start // 6)
+                        if idx < num_clips:
+                            bins[idx] += w['word'].strip() + " "
+                else:
+                    for segment in raw_result['segments']:
+                        start = segment['start']
+                        idx = int(start // 6)
+                        txt = segment['text'].strip()
+                        if should_transliterate:
+                            txt = unidecode(txt)
+                        if idx < num_clips:
+                            bins[idx] += txt + " "
+                
+                lines = []
+                for i in range(num_clips):
+                    start_str = format_time_ref(i * 6)
+                    end_str = format_time_ref((i + 1) * 6)
+                    text_content = bins[i].strip() if bins[i].strip() else "[No speech]"
+                    lines.append(f"[{i+1}] ({start_str} - {end_str})")
+                    lines.append(f"Text: {text_content}")
+                    lines.append("")
+                    lines.append("-" * 20)
+                    lines.append("")
+                
+                return "\n".join(lines)
+            except Exception as e:
+                print(f"❌ Prompts generation error: {e}")
+                return None
+
+        def create_subtitles_ass(raw_result):
+            try:
+                from unidecode import unidecode
+                INDIC_LANGS = {'hi', 'bn', 'gu', 'kn', 'ml', 'mr', 'pa', 'ta', 'te', 'ur', 'sd', 'ne'}
+                detected_lang = raw_result.get('language', 'en')
+                should_transliterate = detected_lang in INDIC_LANGS
+                
+                ass_lines = [
+                    "[Script Info]",
+                    "Title: Generated Subtitles",
+                    "ScriptType: v4.00+",
+                    "WrapStyle: 0",
+                    "ScaledBorderAndShadow: yes",
+                    "YCbCr Matrix: None",
+                    "",
+                    "[V4+ Styles]",
+                    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+                    "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1",
+                    "",
+                    "[Events]",
+                    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+                    ""
+                ]
+                
+                def format_ass_time(seconds):
+                    h = int(seconds // 3600)
+                    m = int((seconds % 3600) // 60)
+                    s = int(seconds % 60)
+                    cs = int((seconds % 1) * 100)
+                    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+                
+                for segment in raw_result['segments']:
+                    start_time = format_ass_time(segment['start'])
+                    end_time = format_ass_time(segment['end'])
+                    text = segment['text'].strip()
+                    
+                    if should_transliterate:
+                        text = unidecode(text)
+                    
+                    text = text.replace('\\', '\\\\').replace('\n', '\\N')
+                    ass_lines.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{text}")
+                
+                return "\n".join(ass_lines)
+            except Exception as e:
+                print(f"❌ Subtitles generation error: {e}")
+                return None
+
+        def transcribe_audio_on_gpu(audio_path):
+            try:
+                print(f"🎙️ Transcribing with Whisper (GPU)...")
+                result = WHISPER_MODEL.transcribe(audio_path, language=None, word_timestamps=True, verbose=False)
+                print(f"✅ Transcription complete: {len(result['segments'])} segments")
+                return result
+            except Exception as e:
+                print(f"❌ Transcription error: {e}")
+                return None
+
+        def process_transcription_job(job_key, job_data):
+            try:
+                job = json.loads(job_data) if isinstance(job_data, str) else job_data
+                job_id = job['job_id']
+                audio_r2_key = job['audio_r2_key']
+                
+                print(f"\n🎙️ [TRANSCRIPTION] Processing: {job_id}")
+                local_audio = f"/tmp/audio_{job_id}.mp3"
+                print(f"   ⬇️ Downloading audio from R2...")
+                s3_client.download_file(R2_BUCKET_NAME, audio_r2_key, local_audio)
+                
+                from moviepy.editor import AudioFileClip
+                clip = AudioFileClip(local_audio)
+                duration = clip.duration
+                clip.close()
+                
+                print(f"   🎙️ Transcribing on GPU...")
+                start_time = time.time()
+                result = transcribe_audio_on_gpu(local_audio)
+                
+                if not result:
+                    db.reference(f'/transcriptions/failed/{job_id}').set({
+                        'error': 'Transcription failed',
+                        'timestamp': time.time()
+                    })
+                    db.reference(job_key).delete()
+                    os.remove(local_audio)
+                    return False
+                
+                transcribe_time = time.time() - start_time
+                
+                print(f"   📝 Generating prompts TXT...")
+                prompts_txt = create_prompts_txt(result, duration)
+                
+                print(f"   📄 Generating subtitles ASS...")
+                subtitles_ass = create_subtitles_ass(result)
+                
+                result_json = json.dumps(result)
+                result_r2_key = f"transcriptions/{job_id}.json"
+                prompts_r2_key = f"transcriptions/{job_id}_prompts.txt"
+                subtitles_r2_key = f"transcriptions/{job_id}_subtitles.ass"
+                
+                print(f"   ⬆️ Uploading to R2...")
+                s3_client.put_object(Bucket=R2_BUCKET_NAME, Key=result_r2_key, Body=result_json.encode('utf-8'), ContentType='application/json')
+                s3_client.put_object(Bucket=R2_BUCKET_NAME, Key=prompts_r2_key, Body=prompts_txt.encode('utf-8'), ContentType='text/plain')
+                s3_client.put_object(Bucket=R2_BUCKET_NAME, Key=subtitles_r2_key, Body=subtitles_ass.encode('utf-8'), ContentType='text/plain')
+                
+                completion_data = {
+                    "transcription_r2_key": result_r2_key,
+                    "prompts_r2_key": prompts_r2_key,
+                    "subtitles_r2_key": subtitles_r2_key,
+                    "duration": transcribe_time,
+                    "audio_duration": duration,
+                    "segments": len(result['segments']),
+                    "job_id": job_id,
+                    "server_id": SERVER_ID
+                }
+                
+                db.reference(f'/transcriptions/completed/{job_id}').set(completion_data)
+                db.reference(f'/notifications/transcriptions/{job_id}').set(completion_data)
+                
+                db.reference(job_key).delete()
+                os.remove(local_audio)
+                print(f"✅ [TRANSCRIPTION] Done! ⏱️ {transcribe_time:.1f}s")
+                return True
+                
+            except Exception as e:
+                print(f"❌ [TRANSCRIPTION] Failed: {e}")
+                db.reference(f'/transcriptions/failed/{job_id}').set({
+                    'error': str(e),
+                    'timestamp': time.time()
+                })
+                try:
+                    db.reference(job_key).delete()
+                except:
+                    pass
+                return False
+
+        # ------------------------------------------
+        # VIDEO GENERATION
+        # ------------------------------------------
+        STEPS = 5
+        GUIDANCE_SCALE = 2.0
+
+        GPU_COUNT = torch.cuda.device_count()
+
+        def upload_to_r2(video_bytes, job_id, max_retries=3):
+            for attempt in range(max_retries):
+                try:
+                    video_key = f"videos/single/{job_id}.mp4"
+                    s3_client.put_object(Bucket=R2_BUCKET_NAME, Key=video_key, Body=video_bytes, ContentType='video/mp4')
+                    url = s3_client.generate_presigned_url('get_object', Params={'Bucket': R2_BUCKET_NAME, 'Key': video_key}, ExpiresIn=604800)
+                    return url
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+            return None
+
+        def image_to_video_clip(image, target_width, target_height, subtitle_path=None):
+            unique_id = str(uuid.uuid4())
+            img_path = f"temp_{unique_id}.png"
+            vid_path = f"output_{unique_id}.mp4"
+
+            try:
+                image.save(img_path)
+                w = (int(target_width) // 2) * 2
+                h = (int(target_height) // 2) * 2
+                
+                zoom_curve = "1.1+0.1*cos(2*PI*on/180)"
+                filter_chain = (
+                    f"scale={w}:{h}:flags=lanczos,"
+                    f"zoompan=z='{zoom_curve}':d=180:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={w}x{h},"
+                    f"vignette=PI/6"
+                )
+                
+                if subtitle_path and os.path.exists(subtitle_path):
+                    abs_sub = os.path.abspath(subtitle_path).replace('\\', '/').replace(':', '\\:')
+                    abs_fonts = os.path.abspath(FONT_DIR).replace('\\', '/').replace(':', '\\:')
+                    filter_chain += f",subtitles='{abs_sub}':fontsdir='{abs_fonts}'"
+                
+                filter_chain += ",fps=30"
+                
+                cmd = [
+                    "ffmpeg", "-y", "-loop", "1", "-i", img_path, "-t", "6",
+                    "-vf", filter_chain,
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "28",
+                    "-maxrate", "2M",
+                    "-bufsize", "4M",
+                    "-pix_fmt", "yuv420p",
+                    "-threads", "8",
+                    vid_path
+                ]
+
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                
+                if os.path.exists(vid_path):
+                    with open(vid_path, "rb") as f:
+                        return f.read()
+                return None
+            except Exception as e:
+                print(f"Video generation error: {e}")
+                return None
+            finally:
+                if os.path.exists(img_path): os.remove(img_path)
+                if os.path.exists(vid_path): os.remove(vid_path)
+
+        def load_engine(device_id):
+            print(f"⏳ Loading SDXL on GPU {device_id}...")
+            pipe = StableDiffusionXLPipeline.from_pretrained(
+                "SG161222/RealVisXL_V4.0_Lightning",
+                torch_dtype=torch.float16,
+                variant="fp16"
+            ).to(f"cuda:{device_id}")
+            
+            pipe.unet.to(memory_format=torch.channels_last)
+            try:
+                pipe.enable_xformers_memory_efficient_attention()
+            except: pass
+            
+            pipe.vae = AutoencoderKL.from_pretrained(
+                "madebyollin/sdxl-vae-fp16-fix",
+                torch_dtype=torch.float16
+            ).to(f"cuda:{device_id}")
+
+            pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
+            pipe.set_progress_bar_config(disable=True)
+            return pipe
+
+        pipelines = []
+        if GPU_COUNT > 0:
+            for i in range(GPU_COUNT):
+                pipelines.append(load_engine(i))
+
+        def get_safe_resolution(aspect_ratio_name):
+            if aspect_ratio_name == "16:9": return (1152, 640, 1920, 1080)
+            elif aspect_ratio_name == "9:16": return (640, 1152, 1080, 1920)
+            elif aspect_ratio_name == "4:5": return (896, 1088, 1080, 1350)
+            elif aspect_ratio_name == "16:7": return (1152, 512, 1920, 840)
+            else: return (1024, 1024, 1024, 1024)
+
+        def process_single_job(job_data, pipeline, gpu_id):
+            """Process a single video generation job"""
+            job_id = job_data['job_id']
+            prompt = job_data['prompt']
+            ratio = job_data['ratio']
+            subtitle_data = job_data.get('subtitle_data', [])
+            
+            print(f"🎬 [{SERVER_ID}/GPU{gpu_id}] Starting: {job_id}")
+            
+            start_time = time.time()
+            ai_w, ai_h, final_w, final_h = get_safe_resolution(ratio)
+            
+            # Generate image
+            neg = "text, watermark, signature, logo, writing, letters, font, typography, bad anatomy, bad hands, missing fingers, extra fingers, three hands, three legs, bad arms, missing legs, missing arms, poorly drawn face, bad face, fused face, cloned face, three crus, fused feet, fused thigh, extra crus, ugly, gross, sloppy, messy, blurry, low quality, duplicate, distortion, mutation, double head"
+            
+            image = pipeline(
+                prompt,
+                num_inference_steps=STEPS,
+                guidance_scale=GUIDANCE_SCALE,
+                width=ai_w,
+                height=ai_h,
+                negative_prompt=neg
+            ).images[0]
+            
+            # Generate subtitle file if needed
+            subtitle_path = None
+            if subtitle_data:
+                try:
+                    unique_sub_id = str(uuid.uuid4())
+                    temp_ass_path = f"temp_{unique_sub_id}.ass"
+                    success = generate_clip_ass_subtitles(subtitle_data, final_w, final_h, temp_ass_path)
+                    if success:
+                        subtitle_path = temp_ass_path
+                except Exception as e:
+                    print(f"Subtitle gen failed: {e}")
+            
+            # Render video
+            video_bytes = image_to_video_clip(image, target_width=final_w, target_height=final_h, subtitle_path=subtitle_path)
+            
+            if subtitle_path and os.path.exists(subtitle_path):
+                os.remove(subtitle_path)
+            
+            if video_bytes:
+                size_mb = len(video_bytes) / (1024 * 1024)
+                r2_url = upload_to_r2(video_bytes, job_id)
+                gen_time = time.time() - start_time
+                
+                if r2_url:
+                    result_data = {
+                        "r2_url": r2_url,
+                        "time": gen_time,
+                        "size_mb": size_mb,
+                        "job_id": job_id,
+                        "server_id": SERVER_ID,
+                        "gpu_id": gpu_id
+                    }
+                    
+                    db.reference(f'/servers/{SERVER_ID}/completed/{job_id}').set(result_data)
+                    db.reference(f'/notifications/videos/{job_id}').set(result_data)
+                    
+                    print(f"✅ [{SERVER_ID}/GPU{gpu_id}] Done! ⏱️ {gen_time:.1f}s | 💾 {size_mb:.2f}MB")
+                    return True
+                else:
+                    db.reference(f'/servers/{SERVER_ID}/failed/{job_id}').set({
+                        'error': 'Upload failed',
+                        'timestamp': time.time()
+                    })
+            else:
+                db.reference(f'/servers/{SERVER_ID}/failed/{job_id}').set({
+                    'error': 'Video generation failed',
+                    'timestamp': time.time()
+                })
+            
+            return False
+
+        # ============================================================================
+        # PARALLEL GPU WORKER - EACH GPU RUNS INDEPENDENTLY
+        # ============================================================================
+        def gpu_worker_loop(gpu_id, pipeline):
+            """
+            Each GPU runs this loop independently in parallel
+            GPU 0 and GPU 1 both continuously fetch and process jobs
+            """
+            print(f"🚀 GPU{gpu_id} Worker Started (Independent Processing)")
+            
+            while True:
+                try:
+                    # Fetch job from Firebase queue
+                    queue_ref = db.reference(f'/servers/{SERVER_ID}/job_queue')
+                    jobs = queue_ref.get()
+                    
+                    if jobs and isinstance(jobs, dict):
+                        # Get first available job
+                        job_key = next(iter(jobs.keys()))
+                        job_data = jobs[job_key]
+                        
+                        # Atomic: Delete job from queue immediately (prevent other GPUs from taking it)
+                        queue_ref.child(job_key).delete()
+                        
+                        # Process the job on this GPU
+                        process_single_job(job_data, pipeline, gpu_id)
+                    else:
+                        # No jobs available, wait a bit
+                        time.sleep(0.5)
+                    
+                except Exception as e:
+                    print(f"❌ GPU{gpu_id} Error: {e}")
+                    time.sleep(2)
+
+        # ------------------------------------------
+        # MAIN LOOP - START PARALLEL GPU WORKERS
+        # ------------------------------------------
+        def main():
+            print("\n" + "="*60)
+            print(f"🚀 GPU SERVER: {SERVER_ID} - PARALLEL PROCESSING")
+            print("="*60)
+            print(f"✅ GPUs: {GPU_COUNT}")
+            print(f"✅ Steps: {STEPS}")
+            print(f"✅ Firebase Path: /servers/{SERVER_ID}")
+            print(f"✅ Whisper: Loaded on GPU")
+            print(f"✅ Mode: PARALLEL (Each GPU processes independently)")
+            print("="*60 + "\n")
+            
+            # Start a worker thread for each GPU
+            gpu_threads = []
+            for gpu_id in range(GPU_COUNT):
+                t = threading.Thread(
+                    target=gpu_worker_loop,
+                    args=(gpu_id, pipelines[gpu_id]),
+                    daemon=True
+                )
+                t.start()
+                gpu_threads.append(t)
+            
+            print(f"🔥 {GPU_COUNT} GPU Workers Running in Parallel!\n")
+            
+            # Main thread handles transcription (priority) and shutdown
+            while True:
+                # Check shutdown time (3:30 PM and 11:00 PM IST)
+                now_utc = datetime.now(timezone.utc)
+                now_ist = now_utc + timedelta(hours=5, minutes=30)
+                
+                is_time1 = (now_ist.hour == 15 and now_ist.minute == 30)
+                is_time2 = (now_ist.hour == 23 and now_ist.minute == 0)
+                
+                if is_time1 or is_time2:
+                    print(f"\n🛑 Scheduled Shutdown: {now_ist.strftime('%I:%M %p')} IST")
+                    sys.exit(0)
+
+                try:
+                    # Handle transcription jobs (priority over video generation)
+                    transcribe_ref = db.reference(f'/transcriptions/pending')
+                    transcribe_jobs = transcribe_ref.get()
+                    
+                    if transcribe_jobs and isinstance(transcribe_jobs, dict):
+                        job_key = next(iter(transcribe_jobs.keys()))
+                        job_data = transcribe_jobs[job_key]
+                        print(f"\n🔥 PRIORITY: Transcription job found")
+                        process_transcription_job(f'/transcriptions/pending/{job_key}', job_data)
+                    
+                    time.sleep(1)
+                    
+                except KeyboardInterrupt:
+                    print("\n🛑 Shutting down...")
+                    break
+                except Exception as e:
+                    print(f"❌ Main loop error: {e}")
+                    time.sleep(5)
+
+        if __name__ == "__main__":
+            main()
+        '''
 
         # ========================================
         # HELPER FUNCTIONS
@@ -109,259 +933,157 @@ jobs:
             except Exception as e:
                 return False, "", str(e)
 
-        def inject_redis_credentials_text(notebook_path, redis_url, redis_token):
+        def create_notebook_from_code(account, notebook_name, server_id):
             """
-            Inject Redis credentials using text-based replacement (FIXED for escaped quotes)
-            Replaces just the URL/Token without quotes to avoid JSON escaping issues
+            Creates a standard Jupyter notebook structure from the BASE_CODE,
+            dynamically injecting the correct SERVER_ID.
             """
-            # Read notebook as plain text
-            with open(notebook_path, 'r', encoding='utf-8') as f:
-                notebook_text = f.read()
+            work_dir = f"work_{notebook_name}_{account['username']}"
+            if os.path.exists(work_dir):
+                shutil.rmtree(work_dir)
+            os.makedirs(work_dir, exist_ok=True)
             
-            # CRITICAL FIX: Replace just the URL (no quotes!) to handle JSON escaping
-            # In JSON, it appears as: "UPSTASH_REDIS_REST_URL = \\"https://...\\"
-            # So we replace just the URL part: https://...
-            notebook_text = notebook_text.replace(
-                'https://absolute-redfish-9172.upstash.io',
-                redis_url
-            )
+            # 1. Modify the Server ID in the python code
+            final_code = BASE_CODE.replace('SERVER_ID = "server_1"', f'SERVER_ID = "{server_id}"')
             
-            # Replace Token (just the token value, no quotes)
-            notebook_text = notebook_text.replace(
-                'ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg',
-                redis_token
-            )
+            # 2. Create Notebook JSON Structure
+            notebook_json = {
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "execution_count": None,
+                        "metadata": {},
+                        "outputs": [],
+                        "source": final_code.splitlines(keepends=True)
+                    }
+                ],
+                "metadata": {
+                    "kernelspec": {
+                        "display_name": "Python 3",
+                        "language": "python",
+                        "name": "python3"
+                    },
+                    "language_info": {
+                        "codemirror_mode": {
+                            "name": "ipython",
+                            "version": 3
+                        },
+                        "file_extension": ".py",
+                        "mimetype": "text/x-python",
+                        "name": "python",
+                        "nbconvert_exporter": "python",
+                        "pygments_lexer": "ipython3",
+                        "version": "3.10.12"
+                    }
+                },
+                "nbformat": 4,
+                "nbformat_minor": 5
+            }
             
-            # Write back
-            with open(notebook_path, 'w', encoding='utf-8') as f:
-                f.write(notebook_text)
+            # 3. Write .ipynb file
+            nb_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
+            with open(nb_path, 'w', encoding='utf-8') as f:
+                json.dump(notebook_json, f, indent=1)
+                
+            # 4. Create Metadata
+            dest_slug = f"{account['username']}/{notebook_name}"
+            metadata = {
+                "id": dest_slug,
+                "title": notebook_name,
+                "code_file": f"{notebook_name}.ipynb",
+                "language": "python",
+                "kernel_type": "notebook",
+                "is_private": True,
+                "enable_gpu": True,
+                "enable_internet": True,
+                "enable_tpu": False,
+                "dataset_sources": [],
+                "kernel_sources": [],
+                "competition_sources": []
+            }
             
-            return True
+            with open(os.path.join(work_dir, "kernel-metadata.json"), 'w') as f:
+                json.dump(metadata, f, indent=2)
+                
+            return work_dir
 
-        def execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token):
-            log(f"START: {notebook_name} → {account['username']}", "🚀")
-            log(f"  Redis: {redis_url.split('//')[1].split('.')[0]}", "🔗")
+        def execute_notebook(account, notebook_name, server_id):
+            log(f"START: {notebook_name} (ID: {server_id}) -> {account['username']}", "🚀")
             
-            # Use absolute paths for thread safety
-            base_dir = os.getcwd()
-            work_dir = os.path.join(base_dir, f"work_{notebook_name}_{account['username']}")
+            work_dir = create_notebook_from_code(account, notebook_name, server_id)
             
             try:
-                # Clean directory
-                if os.path.exists(work_dir):
-                    shutil.rmtree(work_dir)
-                os.makedirs(work_dir)
-                
-                # STEP 1: Copy base notebook from repo
-                log(f"Loading base notebook template...", "📂")
-                base_notebook_path = os.path.join(base_dir, "server-8.ipynb")
-                
-                if not os.path.exists(base_notebook_path):
-                    log(f"ERROR: server-4.ipynb not found in repository!", "❌")
-                    return False
-                
-                work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
-                shutil.copy(base_notebook_path, work_notebook_path)
-                
-                # STEP 2: Inject Redis credentials (TEXT-BASED - URL only, no quotes!)
-                log(f"Injecting Redis credentials...", "💉")
-                inject_redis_credentials_text(work_notebook_path, redis_url, redis_token)
-                
-                # Verify injection worked (check for URL without protocol prefix)
-                with open(work_notebook_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    # Check if new URL is present (just domain part to be sure)
-                    url_domain = redis_url.split('//')[1].split('.')[0]  # e.g., "fair-drake-18300"
-                    if url_domain in content:
-                        log(f"✓ Verified: {url_domain} injected successfully", "🔍")
-                    else:
-                        log(f"⚠️ Warning: {url_domain} not found in notebook!", "⚠️")
-                
-                # STEP 3: Create FRESH metadata (ALWAYS CREATE MODE)
-                log(f"Creating fresh metadata (always create mode)...", "🆕")
-                metadata = {
-                    "id": dest_slug,
-                    "title": notebook_name,
-                    "code_file": f"{notebook_name}.ipynb",
-                    "language": "python",
-                    "kernel_type": "notebook",
-                    "is_private": True,
-                    "enable_gpu": True,
-                    "enable_internet": True,
-                    "enable_tpu": False,
-                    "dataset_sources": [],
-                    "kernel_sources": [],
-                    "competition_sources": []
-                }
-                
-                # Save metadata
-                metadata_path = os.path.join(work_dir, "kernel-metadata.json")
-                with open(metadata_path, 'w', encoding='utf-8') as f:
-                    json.dump(metadata, f, indent=2)
-                
-                log(f"Metadata created: id={metadata['id']}", "📝")
-                
-                # STEP 4: Push to Kaggle (THREAD-SAFE with cwd parameter)
                 setup_kaggle_auth(account)
-                time.sleep(0.3)
-                
-                # List directory contents
-                dir_contents = [f for f in os.listdir(work_dir)]
-                log(f"Directory contents: {dir_contents}", "📂")
+                time.sleep(0.5)
                 
                 log(f"Pushing to Kaggle...", "📤")
-                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
+                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=300, cwd=work_dir)
                 
                 if not success:
                     log(f"PUSH FAILED", "❌")
                     log(f"Stderr: {stderr[:500]}", "")
-                    log(f"Stdout: {stdout[:500]}", "")
                     return False
                 
-                log(f"Push OK: {notebook_name}", "✅")
-                log(f"URL: https://www.kaggle.com/code/{dest_slug}", "🔗")
+                log(f"Push OK: https://www.kaggle.com/code/{account['username']}/{notebook_name}", "✅")
                 return True
                 
             except Exception as e:
                 log(f"EXCEPTION: {str(e)}", "❌")
-                import traceback
-                traceback.print_exc()
                 return False
-                
             finally:
-                # Cleanup
                 if os.path.exists(work_dir):
-                    try:
-                        shutil.rmtree(work_dir)
-                    except:
-                        pass
+                    shutil.rmtree(work_dir)
 
-        # ========================================
-        # PARALLEL EXECUTION WORKER
-        # ========================================
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading
-        
-        results_lock = threading.Lock()
-        
-        def execute_notebook_wrapper(args):
-            """Wrapper for parallel execution with stagger delay"""
-            account, notebook_name, dest_slug, redis_url, redis_token, start_delay = args
-            
-            # Stagger the start to avoid Kaggle API rate limiting
-            if start_delay > 0:
-                time.sleep(start_delay)
-            
-            result_key = f"{account['username']}/{notebook_name}"
-            success = execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token)
-            return (result_key, success)
-        
         # ========================================
         # MAIN EXECUTION
         # ========================================
         def execute_all():
-            start = datetime.utcnow()
-            
-            # Detect current day
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - V3 FINAL (URL-Only Replacement)", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - V4 FIREBASE (Dynamic Generation)", "🔥")
             log("═" * 70, "")
-            log(f"Current Day: {current_day}", "📅")
-            log(f"Execution Time: {start.isoformat()}", "🕐")
+            log(f"Day: {current_day}", "📅")
+            log(f"Servers Required: {TARGET_SERVERS}", "⚙️")
             
-            # Check if day has configuration
             if current_day not in WEEKLY_SCHEDULE:
                 log(f"ERROR: {current_day} not in schedule!", "❌")
                 sys.exit(1)
             
             accounts_today = WEEKLY_SCHEDULE[current_day]
             
-            # Check if day has accounts
             if not accounts_today:
-                log(f"⚠️ No accounts configured for {current_day}. Skipping execution.", "⏭️")
-                log("Please add account credentials for this day in the workflow configuration.", "")
+                log(f"⚠️ No accounts for {current_day}", "⏭️")
                 sys.exit(0)
             
-            log(f"Accounts scheduled: {len(accounts_today)}", "👥")
-            log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
-            log(f"Mode: ALWAYS CREATE (Fresh notebooks every time)", "⚡")
-            log(f"Injection: URL-only replacement (handles JSON escaping)", "💉")
-            log(f"Stagger: 2s interval to avoid API limits", "⏱️")
-            log("═" * 70, "")
+            log(f"Accounts Available: {len(accounts_today)}", "👥")
             
-            # Calculate starting Redis index based on day
-            day_order = ["Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
-            redis_index = 0
-            if current_day in day_order:
-                day_position = day_order.index(current_day)
-                redis_index = day_position * 4
-            
-            # Prepare all tasks
+            # Distribute servers among accounts (Round Robin)
             tasks = []
-            task_index = 0
-            for account_idx, account in enumerate(accounts_today):
-                log(f"📋 Preparing tasks for: {account['username']}", "")
+            for i, server_id in enumerate(TARGET_SERVERS):
+                assigned_account = accounts_today[i % len(accounts_today)]
                 
-                for notebook_name in ["server-1", "server-2"]:
-                    dest_slug = f"{account['username']}/{notebook_name}"
-                    redis_url, redis_token = REDIS_POOL[redis_index % len(REDIS_POOL)]
-                    
-                    # Calculate stagger delay: 2 seconds between each task
-                    start_delay = task_index * 2
-                    
-                    log(f"  • {notebook_name} → Redis: {redis_url.split('//')[1].split('.')[0]} (start +{start_delay}s)", "")
-                    
-                    tasks.append((account, notebook_name, dest_slug, redis_url, redis_token, start_delay))
-                    redis_index += 1
-                    task_index += 1
-            
-            log("", "")
-            log(f"🚀 Starting execution ({len(tasks)} notebooks, 2s stagger)...", "")
-            log("═" * 70, "")
-            
-            results = {}
-            
-            # Execute all notebooks in parallel (with stagger)
-            with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-                future_to_task = {executor.submit(execute_notebook_wrapper, task): task for task in tasks}
+                # Kaggle Kernel Name (Must correspond to server_id for clarity)
+                # Maps server_1 -> server-1 (Kaggle doesn't like underscores in titles sometimes)
+                notebook_name = server_id.replace("_", "-") 
                 
-                for future in as_completed(future_to_task):
-                    result_key, success = future.result()
-                    results[result_key] = success
-                    
-                    status = "✅" if success else "❌"
-                    log(f"{status} Completed: {result_key}", "")
-            
-            # Summary
-            success_count = sum(results.values())
-            duration = (datetime.utcnow() - start).total_seconds()
-            
-            log("", "")
-            log("═" * 70, "")
-            log(f"EXECUTION SUMMARY", "🏁")
-            log("═" * 70, "")
-            log(f"Day: {current_day}", "📅")
-            log(f"Total Time: {duration:.1f}s ({duration/60:.1f} min)", "⏱️")
-            log(f"Success: {success_count}/{len(results)}", "📊")
-            log("", "")
-            
-            for nb_name, success in sorted(results.items()):
-                status = "✅" if success else "❌"
-                log(f"{status} {nb_name}", "")
-            
-            log("═" * 70, "")
-            
-            if success_count < len(results):
-                log(f"⚠️ {len(results) - success_count} notebook(s) failed", "")
-                sys.exit(1)
-            else:
-                log("🎉 All notebooks executed successfully!", "")
-                log("", "")
-                log("🔍 VERIFICATION: Check notebooks on Kaggle to confirm unique Redis URLs:", "")
-                for nb_name in sorted(results.keys()):
-                    log(f"   https://www.kaggle.com/code/{nb_name}", "🔗")
+                tasks.append((assigned_account, notebook_name, server_id))
 
-        execute_all()
+            # Execute sequentially to avoid rate limits
+            success_count = 0
+            
+            for account, nb_name, srv_id in tasks:
+                log("-" * 30)
+                if execute_notebook(account, nb_name, srv_id):
+                    success_count += 1
+                time.sleep(3) # Short pause between pushes
+
+            log("═" * 70, "")
+            log(f"SUMMARY: {success_count}/{len(tasks)} Deployed", "📊")
+            
+            if success_count < len(tasks):
+                sys.exit(1)
+
+        if __name__ == "__main__":
+            execute_all()
         PYEOF
