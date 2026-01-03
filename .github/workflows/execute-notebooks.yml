@@ -7,7 +7,7 @@ on:
 
 jobs:
   execute-notebooks:
-    runs-runs-on: ubuntu-latest
+    runs-on: ubuntu-latest
     
     steps:
     - name: Checkout code
@@ -59,7 +59,7 @@ jobs:
             ],
             "Saturday": [
                 {"username": "vathsam", "key": "f50456cea220739ad0ecb651e79593bd"},
-                {"username": "svproeditor", "key": "dee169dffee0cc31fffe2a30a4bb01a8"}
+                {"username": "svproeditor", "key": "e423020355bbdd8a2a8b410587cec0cd"}
             ],
             "Sunday": [
                 {"username": "yamanya", "key": "6a8da12facf5fbcc820cd00baa788a99"},
@@ -71,9 +71,16 @@ jobs:
             ],
             "Tuesday": [
                 {"username": "leommmmm", "key": "c88472f292e5de46c97952906d79c896"}
+                # Account 10: PENDING - Add when available
             ],
-            "Wednesday": [],
-            "Thursday": []
+            "Wednesday": [
+                # Account 11: PENDING
+                # Account 12: PENDING
+            ],
+            "Thursday": [
+                # Account 13: PENDING
+                # Account 14: PENDING
+            ]
         }
 
         # ========================================
@@ -103,42 +110,75 @@ jobs:
                 return False, "", str(e)
 
         def inject_redis_credentials_text(notebook_path, redis_url, redis_token):
+            """
+            Inject Redis credentials using text-based replacement (FIXED for escaped quotes)
+            Replaces just the URL/Token without quotes to avoid JSON escaping issues
+            """
+            # Read notebook as plain text
             with open(notebook_path, 'r', encoding='utf-8') as f:
                 notebook_text = f.read()
             
+            # CRITICAL FIX: Replace just the URL (no quotes!) to handle JSON escaping
+            # In JSON, it appears as: "UPSTASH_REDIS_REST_URL = \\"https://...\\"
+            # So we replace just the URL part: https://...
             notebook_text = notebook_text.replace(
                 'https://absolute-redfish-9172.upstash.io',
                 redis_url
             )
+            
+            # Replace Token (just the token value, no quotes)
             notebook_text = notebook_text.replace(
                 'ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg',
                 redis_token
             )
             
+            # Write back
             with open(notebook_path, 'w', encoding='utf-8') as f:
                 f.write(notebook_text)
+            
             return True
 
         def execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token):
             log(f"START: {notebook_name} → {account['username']}", "🚀")
+            log(f"  Redis: {redis_url.split('//')[1].split('.')[0]}", "🔗")
+            
+            # Use absolute paths for thread safety
             base_dir = os.getcwd()
             work_dir = os.path.join(base_dir, f"work_{notebook_name}_{account['username']}")
             
             try:
+                # Clean directory
                 if os.path.exists(work_dir):
                     shutil.rmtree(work_dir)
                 os.makedirs(work_dir)
                 
+                # STEP 1: Copy base notebook from repo
+                log(f"Loading base notebook template...", "📂")
                 base_notebook_path = os.path.join(base_dir, "server-5.ipynb")
+                
                 if not os.path.exists(base_notebook_path):
-                    log(f"ERROR: server-5.ipynb not found!", "❌")
+                    log(f"ERROR: server-4.ipynb not found in repository!", "❌")
                     return False
                 
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
+                # STEP 2: Inject Redis credentials (TEXT-BASED - URL only, no quotes!)
+                log(f"Injecting Redis credentials...", "💉")
                 inject_redis_credentials_text(work_notebook_path, redis_url, redis_token)
                 
+                # Verify injection worked (check for URL without protocol prefix)
+                with open(work_notebook_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    # Check if new URL is present (just domain part to be sure)
+                    url_domain = redis_url.split('//')[1].split('.')[0]  # e.g., "fair-drake-18300"
+                    if url_domain in content:
+                        log(f"✓ Verified: {url_domain} injected successfully", "🔍")
+                    else:
+                        log(f"⚠️ Warning: {url_domain} not found in notebook!", "⚠️")
+                
+                # STEP 3: Create FRESH metadata (ALWAYS CREATE MODE)
+                log(f"Creating fresh metadata (always create mode)...", "🆕")
                 metadata = {
                     "id": dest_slug,
                     "title": notebook_name,
@@ -154,75 +194,174 @@ jobs:
                     "competition_sources": []
                 }
                 
+                # Save metadata
                 metadata_path = os.path.join(work_dir, "kernel-metadata.json")
                 with open(metadata_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2)
                 
+                log(f"Metadata created: id={metadata['id']}", "📝")
+                
+                # STEP 4: Push to Kaggle (THREAD-SAFE with cwd parameter)
                 setup_kaggle_auth(account)
                 time.sleep(0.3)
                 
+                # List directory contents
+                dir_contents = [f for f in os.listdir(work_dir)]
+                log(f"Directory contents: {dir_contents}", "📂")
+                
+                log(f"Pushing to Kaggle...", "📤")
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
-                    log(f"PUSH FAILED: {stderr[:500]}", "❌")
+                    log(f"PUSH FAILED", "❌")
+                    log(f"Stderr: {stderr[:500]}", "")
+                    log(f"Stdout: {stdout[:500]}", "")
                     return False
                 
                 log(f"Push OK: {notebook_name}", "✅")
+                log(f"URL: https://www.kaggle.com/code/{dest_slug}", "🔗")
                 return True
                 
             except Exception as e:
                 log(f"EXCEPTION: {str(e)}", "❌")
+                import traceback
+                traceback.print_exc()
                 return False
+                
             finally:
+                # Cleanup
                 if os.path.exists(work_dir):
-                    shutil.rmtree(work_dir)
+                    try:
+                        shutil.rmtree(work_dir)
+                    except:
+                        pass
 
         # ========================================
-        # PARALLEL EXECUTION
+        # PARALLEL EXECUTION WORKER
         # ========================================
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        results_lock = threading.Lock()
         
         def execute_notebook_wrapper(args):
+            """Wrapper for parallel execution with stagger delay"""
             account, notebook_name, dest_slug, redis_url, redis_token, start_delay = args
+            
+            # Stagger the start to avoid Kaggle API rate limiting
             if start_delay > 0:
                 time.sleep(start_delay)
+            
             result_key = f"{account['username']}/{notebook_name}"
             success = execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token)
             return (result_key, success)
         
+        # ========================================
+        # MAIN EXECUTION
+        # ========================================
         def execute_all():
             start = datetime.utcnow()
+            
+            # Detect current day
             current_day = datetime.utcnow().strftime('%A')
             
-            if current_day not in WEEKLY_SCHEDULE or not WEEKLY_SCHEDULE[current_day]:
-                log(f"No tasks for {current_day}", "⏭️")
-                return
-
-            accounts_today = WEEKLY_SCHEDULE[current_day]
-            day_order = ["Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
-            redis_index = (day_order.index(current_day) * 4)
+            log("═" * 70, "")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - V3 FINAL (URL-Only Replacement)", "🚀")
+            log("═" * 70, "")
+            log(f"Current Day: {current_day}", "📅")
+            log(f"Execution Time: {start.isoformat()}", "🕐")
             
+            # Check if day has configuration
+            if current_day not in WEEKLY_SCHEDULE:
+                log(f"ERROR: {current_day} not in schedule!", "❌")
+                sys.exit(1)
+            
+            accounts_today = WEEKLY_SCHEDULE[current_day]
+            
+            # Check if day has accounts
+            if not accounts_today:
+                log(f"⚠️ No accounts configured for {current_day}. Skipping execution.", "⏭️")
+                log("Please add account credentials for this day in the workflow configuration.", "")
+                sys.exit(0)
+            
+            log(f"Accounts scheduled: {len(accounts_today)}", "👥")
+            log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
+            log(f"Mode: ALWAYS CREATE (Fresh notebooks every time)", "⚡")
+            log(f"Injection: URL-only replacement (handles JSON escaping)", "💉")
+            log(f"Stagger: 2s interval to avoid API limits", "⏱️")
+            log("═" * 70, "")
+            
+            # Calculate starting Redis index based on day
+            day_order = ["Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
+            redis_index = 0
+            if current_day in day_order:
+                day_position = day_order.index(current_day)
+                redis_index = day_position * 4
+            
+            # Prepare all tasks
             tasks = []
             task_index = 0
-            for account in accounts_today:
+            for account_idx, account in enumerate(accounts_today):
+                log(f"📋 Preparing tasks for: {account['username']}", "")
+                
                 for notebook_name in ["server-1", "server-2"]:
                     dest_slug = f"{account['username']}/{notebook_name}"
                     redis_url, redis_token = REDIS_POOL[redis_index % len(REDIS_POOL)]
-                    tasks.append((account, notebook_name, dest_slug, redis_url, redis_token, task_index * 2))
+                    
+                    # Calculate stagger delay: 2 seconds between each task
+                    start_delay = task_index * 2
+                    
+                    log(f"  • {notebook_name} → Redis: {redis_url.split('//')[1].split('.')[0]} (start +{start_delay}s)", "")
+                    
+                    tasks.append((account, notebook_name, dest_slug, redis_url, redis_token, start_delay))
                     redis_index += 1
                     task_index += 1
             
-            results = {}
-            with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-                futures = [executor.submit(execute_notebook_wrapper, t) for t in tasks]
-                for f in as_completed(futures):
-                    res_key, success = f.result()
-                    results[res_key] = success
+            log("", "")
+            log(f"🚀 Starting execution ({len(tasks)} notebooks, 2s stagger)...", "")
+            log("═" * 70, "")
             
+            results = {}
+            
+            # Execute all notebooks in parallel (with stagger)
+            with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+                future_to_task = {executor.submit(execute_notebook_wrapper, task): task for task in tasks}
+                
+                for future in as_completed(future_to_task):
+                    result_key, success = future.result()
+                    results[result_key] = success
+                    
+                    status = "✅" if success else "❌"
+                    log(f"{status} Completed: {result_key}", "")
+            
+            # Summary
             success_count = sum(results.values())
-            log(f"SUMMARY: {success_count}/{len(results)} successful", "🏁")
+            duration = (datetime.utcnow() - start).total_seconds()
+            
+            log("", "")
+            log("═" * 70, "")
+            log(f"EXECUTION SUMMARY", "🏁")
+            log("═" * 70, "")
+            log(f"Day: {current_day}", "📅")
+            log(f"Total Time: {duration:.1f}s ({duration/60:.1f} min)", "⏱️")
+            log(f"Success: {success_count}/{len(results)}", "📊")
+            log("", "")
+            
+            for nb_name, success in sorted(results.items()):
+                status = "✅" if success else "❌"
+                log(f"{status} {nb_name}", "")
+            
+            log("═" * 70, "")
+            
             if success_count < len(results):
+                log(f"⚠️ {len(results) - success_count} notebook(s) failed", "")
                 sys.exit(1)
+            else:
+                log("🎉 All notebooks executed successfully!", "")
+                log("", "")
+                log("🔍 VERIFICATION: Check notebooks on Kaggle to confirm unique Redis URLs:", "")
+                for nb_name in sorted(results.keys()):
+                    log(f"   https://www.kaggle.com/code/{nb_name}", "🔗")
 
         execute_all()
         PYEOF
