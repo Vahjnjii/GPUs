@@ -154,7 +154,7 @@ jobs:
                 
                 # STEP 1: Copy base notebook from repo
                 log(f"Loading base notebook template...", "📂")
-                base_notebook_path = os.path.join(base_dir, "server-5.ipynb")
+                base_notebook_path = os.path.join(base_dir, "server-8.ipynb")
                 
                 if not os.path.exists(base_notebook_path):
                     log(f"ERROR: server-4.ipynb not found in repository!", "❌")
