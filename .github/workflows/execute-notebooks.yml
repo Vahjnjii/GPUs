@@ -1,4 +1,4 @@
-name: Kaggle Executor - T4 GPU Fix
+name: Kaggle Executor - T4 GPU Fix (Force Delete)
 
 on:
   workflow_dispatch:
@@ -99,10 +99,6 @@ jobs:
                 return False, "", str(e)
 
         def inject_server_id_raw(notebook_path, server_id):
-            """
-            Reads file as raw text and uses Regex to replace the specific line.
-            Matches: SERVER_ID = "..." 
-            """
             try:
                 with open(notebook_path, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -117,29 +113,25 @@ jobs:
                         f.write(new_content)
                     return True, f"Replaced {count} occurrence(s)"
                 else:
-                    snippet_idx = content.find("SERVER_ID")
-                    snippet = content[snippet_idx:snippet_idx+50] if snippet_idx != -1 else "Not Found"
-                    return False, f"Pattern not found. Snippet: {snippet}"
+                    return False, "Pattern not found"
                     
             except Exception as e:
                 return False, str(e)
 
+        # ==============================================================
+        # FORCE T4 METADATA
+        # ==============================================================
         def inject_t4_metadata(notebook_path):
-            """
-            Opens the .ipynb JSON and forces the accelerator metadata to T4.
-            This is required because kernel-metadata.json gpu_type is often ignored.
-            """
             try:
                 with open(notebook_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                # Ensure metadata structure exists
-                if 'metadata' not in data:
-                    data['metadata'] = {}
-                if 'kaggle' not in data['metadata']:
-                    data['metadata']['kaggle'] = {}
+                # Create structure if missing
+                if 'metadata' not in data: data['metadata'] = {}
+                if 'kaggle' not in data['metadata']: data['metadata']['kaggle'] = {}
                 
                 # FORCE T4 SETTINGS
+                # This ensures the NEW kernel is created as T4
                 data['metadata']['kaggle']['accelerator'] = 'nvidiaTeslaT4'
                 data['metadata']['kaggle']['isGpuEnabled'] = True
                 
@@ -152,45 +144,45 @@ jobs:
 
         def execute_notebook(account, notebook_name, dest_slug, server_id):
             log(f"START: {notebook_name} → {account['username']}", "🚀")
-            log(f"  Target ID: {server_id}", "🎯")
             
             base_dir = os.getcwd()
             work_dir = os.path.join(base_dir, f"work_{notebook_name}_{account['username']}")
             
             try:
-                # Clean directory
+                # Setup Auth first (needed for delete)
+                setup_kaggle_auth(account)
+
+                # ====================================================
+                # KEY FIX: DELETE EXISTING KERNEL (RESET HARDWARE)
+                # ====================================================
+                log(f"Resetting kernel {dest_slug}...", "♻️")
+                # We ignore errors here because if the kernel doesn't exist, it returns 404, which is fine.
+                run_cmd(f"kaggle kernels delete {dest_slug} -y", timeout=60)
+                # Short sleep to ensure Kaggle backend processes the deletion
+                time.sleep(5)
+                
+                # Prepare Directory
                 if os.path.exists(work_dir):
                     shutil.rmtree(work_dir)
                 os.makedirs(work_dir)
                 
-                # STEP 1: Copy base notebook
                 base_notebook_path = os.path.join(base_dir, "gpuss.ipynb")
+                work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 
                 if not os.path.exists(base_notebook_path):
-                    log(f"ERROR: gpuss.ipynb not found!", "❌")
                     return False
-                
-                work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
+                    
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: RAW TEXT INJECTION (SERVER ID)
-                success, msg = inject_server_id_raw(work_notebook_path, server_id)
-                if success:
-                    log(f"✓ {msg} -> {server_id}", "💉")
-                else:
-                    log(f"❌ INJECTION FAILED: {msg}", "❌")
-                    return False
+                # 1. Inject Server ID
+                inject_server_id_raw(work_notebook_path, server_id)
 
-                # STEP 2.5: FORCE T4 METADATA INJECTION
-                # We inject this at the same time as the Server ID
+                # 2. Inject T4 Metadata
                 t4_success, t4_msg = inject_t4_metadata(work_notebook_path)
                 if t4_success:
                     log(f"✓ {t4_msg}", "⚡")
-                else:
-                    log(f"⚠ T4 INJECTION FAILED: {t4_msg}", "⚠")
                 
-                # STEP 3: Create Metadata 
-                # Note: We still keep gpu_type here just in case, but Step 2.5 is the real fix
+                # 3. Create Metadata
                 metadata = {
                     "id": dest_slug,
                     "title": notebook_name,
@@ -201,20 +193,14 @@ jobs:
                     "enable_gpu": True,
                     "enable_internet": True,
                     "enable_tpu": False,
-                    "gpu_type": "nvidiaTeslaT4",
-                    "dataset_sources": [FIREBASE_DATASET_REF],
-                    "kernel_sources": [],
-                    "competition_sources": []
+                    "dataset_sources": [FIREBASE_DATASET_REF]
                 }
                 
-                metadata_path = os.path.join(work_dir, "kernel-metadata.json")
-                with open(metadata_path, 'w', encoding='utf-8') as f:
+                with open(os.path.join(work_dir, "kernel-metadata.json"), 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2)
                 
-                # STEP 4: Push to Kaggle
-                setup_kaggle_auth(account)
-                
-                log("Pushing...", "📤")
+                # 4. Push (This will now be a creation event, reading the T4 metadata)
+                log("Pushing new T4 kernel...", "📤")
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
@@ -232,9 +218,6 @@ jobs:
                     try: shutil.rmtree(work_dir)
                     except: pass
 
-        # ========================================
-        # MAIN EXECUTION
-        # ========================================
         def execute_notebook_wrapper(args):
             account, notebook_name, dest_slug, server_id, start_delay = args
             if start_delay > 0: time.sleep(start_delay)
@@ -243,23 +226,14 @@ jobs:
             return (result_key, success)
         
         def execute_all():
-            start = datetime.utcnow()
             current_day = datetime.utcnow().strftime('%A')
             
-            log("═" * 70, "")
-            log(f"KAGGLE EXECUTOR - T4 GPU FIX", "🚀")
-            log("═" * 70, "")
-            
             if current_day not in WEEKLY_SCHEDULE:
-                log(f"Error: Day {current_day} not found.", "❌")
                 sys.exit(1)
             
             accounts_today = WEEKLY_SCHEDULE[current_day]
             if not accounts_today:
-                log(f"No accounts for {current_day}.", "⏭️")
                 sys.exit(0)
-            
-            log(f"Target: {len(accounts_today)} accounts", "👥")
             
             tasks = []
             global_counter = 1 
@@ -275,9 +249,6 @@ jobs:
                     global_counter += 1
                     task_delay_counter += 1
             
-            log("═" * 70, "")
-            log(f"🚀 Launching {len(tasks)} notebooks with T4 GPU...", "")
-            
             results = {}
             with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
                 future_to_task = {executor.submit(execute_notebook_wrapper, task): task for task in tasks}
@@ -286,11 +257,7 @@ jobs:
                     results[key] = success
                     print(f"Result: {key} -> {'✅ Success' if success else '❌ Failed'}")
 
-            success_count = sum(results.values())
-            log("═" * 70, "")
-            log(f"SUMMARY: {success_count}/{len(tasks)} Successful", "🏁")
-            
-            if success_count < len(tasks):
+            if sum(results.values()) < len(tasks):
                 sys.exit(1)
 
         execute_all()
