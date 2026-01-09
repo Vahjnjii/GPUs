@@ -29,14 +29,16 @@ jobs:
         import subprocess
         import json
         import sys
+        import re
         from datetime import datetime
         import shutil
         import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         # ========================================
         # FIREBASE CONFIGURATION
         # ========================================
-        # Public Firebase credentials dataset (accessible to all accounts)
+        # Public Firebase credentials dataset
         FIREBASE_DATASET_REF = "shreevathsbbhh/firebase-credentials"
 
         # ========================================
@@ -61,16 +63,10 @@ jobs:
             ],
             "Tuesday": [
                 {"username": "leommmmm", "key": "c88472f292e5de46c97952906d79c896"}
-                # Account 10: PENDING - Add when available
+                # Add more accounts here
             ],
-            "Wednesday": [
-                # Account 11: PENDING
-                # Account 12: PENDING
-            ],
-            "Thursday": [
-                # Account 13: PENDING
-                # Account 14: PENDING
-            ]
+            "Wednesday": [],
+            "Thursday": []
         }
 
         # ========================================
@@ -99,52 +95,39 @@ jobs:
             except Exception as e:
                 return False, "", str(e)
 
-        def inject_server_id(notebook_path, server_id):
+        def inject_server_id_regex(notebook_path, server_id):
             """
-            Inject SERVER_ID into the notebook using text-based replacement.
-            Replaces: SERVER_ID = "server_1" with appropriate server number
-            """
-            with open(notebook_path, 'r', encoding='utf-8') as f:
-                notebook_text = f.read()
-            
-            # Replace SERVER_ID value (handles JSON escaping automatically)
-            notebook_text = notebook_text.replace(
-                'SERVER_ID = "server_1"',
-                f'SERVER_ID = "{server_id}"'
-            )
-            
-            with open(notebook_path, 'w', encoding='utf-8') as f:
-                f.write(notebook_text)
-            
-            return True
-
-        def get_dataset_id(dataset_ref):
-            """
-            Retrieve the numeric dataset ID from Kaggle API.
-            Format: username/dataset-name → numeric ID
+            Inject SERVER_ID using Regex. 
+            Finds ANY 'SERVER_ID = "..."' and replaces it.
             """
             try:
-                # Use kaggle API to get dataset info
-                cmd = f'kaggle datasets status {dataset_ref}'
-                success, stdout, stderr = run_cmd(cmd, timeout=30)
+                with open(notebook_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
                 
-                if success and stdout:
-                    # Parse dataset info - this is a simplified approach
-                    # In production, you might want to use kaggle API directly
-                    log(f"Dataset found: {dataset_ref}", "✅")
-                    # Return a placeholder - Kaggle will resolve by ref
-                    return dataset_ref
-                else:
-                    log(f"Warning: Could not verify dataset {dataset_ref}", "⚠️")
-                    return dataset_ref
+                # Regex to find: SERVER_ID = "anything" (handling spaces)
+                # Replaces with: SERVER_ID = "server_1" (or whatever ID is passed)
+                pattern = r'SERVER_ID\s*=\s*".*?"'
+                replacement = f'SERVER_ID = "{server_id}"'
+                
+                new_content, count = re.subn(pattern, replacement, content)
+                
+                if count == 0:
+                    # Fallback: If variable not found, append it to the top (or logging warning)
+                    log(f"⚠️ Variable SERVER_ID not found to replace! Appending...", "⚠️")
+                    # This is a basic append to the start of the file string - risky in JSON but better than nothing
+                    # Ideally, your base notebook MUST have SERVER_ID = "default" defined.
+                    return False
+                
+                with open(notebook_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                    
+                return True
             except Exception as e:
-                log(f"Dataset check error: {e}", "⚠️")
-                return dataset_ref
+                log(f"Injection Error: {e}", "❌")
+                return False
 
         def execute_notebook(account, notebook_name, dest_slug, server_id):
             log(f"START: {notebook_name} → {account['username']}", "🚀")
-            log(f"  Server ID: {server_id}", "🔧")
-            log(f"  Dataset: {FIREBASE_DATASET_REF}", "🔥")
             
             # Use absolute paths for thread safety
             base_dir = os.getcwd()
@@ -156,34 +139,33 @@ jobs:
                     shutil.rmtree(work_dir)
                 os.makedirs(work_dir)
                 
-                # STEP 1: Copy base notebook from repo
-                log(f"Loading base notebook template...", "📂")
+                # STEP 1: Copy base notebook
                 base_notebook_path = os.path.join(base_dir, "gpuss.ipynb")
                 
                 if not os.path.exists(base_notebook_path):
-                    log(f"ERROR: gpuss.ipynb not found in repository!", "❌")
+                    log(f"ERROR: gpuss.ipynb not found!", "❌")
                     return False
                 
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: Inject SERVER_ID
-                log(f"Injecting SERVER_ID: {server_id}...", "💉")
-                inject_server_id(work_notebook_path, server_id)
+                # STEP 2: Inject SERVER_ID (Robust Regex Mode)
+                if inject_server_id_regex(work_notebook_path, server_id):
+                    log(f"✓ Injected: {server_id}", "💉")
+                else:
+                    log(f"❌ Failed to inject {server_id} (Check variable name in gpuss.ipynb)", "❌")
                 
-                # Verify injection
-                with open(work_notebook_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    if f'SERVER_ID = "{server_id}"' in content:
-                        log(f"✓ Verified: {server_id} injected successfully", "🔍")
-                    else:
-                        log(f"⚠️ Warning: {server_id} not found in notebook!", "⚠️")
-                
-                # STEP 3: Create metadata with Firebase dataset
-                log(f"Creating metadata with Firebase dataset...", "📝")
+                # STEP 3: Create Metadata
+                # Title formatting: "Server 1" -> "Server 01" for sorting
+                title_num = server_id.split('_')[-1]
+                if title_num.isdigit():
+                    formatted_title = f"Server {int(title_num):02d}"
+                else:
+                    formatted_title = server_id
+
                 metadata = {
                     "id": dest_slug,
-                    "title": notebook_name,
+                    "title": formatted_title,
                     "code_file": f"{notebook_name}.ipynb",
                     "language": "python",
                     "kernel_type": "notebook",
@@ -191,7 +173,7 @@ jobs:
                     "enable_gpu": True,
                     "enable_internet": True,
                     "enable_tpu": False,
-                    "dataset_sources": [FIREBASE_DATASET_REF],  # Firebase credentials dataset
+                    "dataset_sources": [FIREBASE_DATASET_REF],
                     "kernel_sources": [],
                     "competition_sources": []
                 }
@@ -201,60 +183,34 @@ jobs:
                 with open(metadata_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2)
                 
-                log(f"Metadata created: id={metadata['id']}", "📋")
-                log(f"  Dataset attached: {FIREBASE_DATASET_REF}", "📎")
-                
                 # STEP 4: Push to Kaggle
                 setup_kaggle_auth(account)
-                time.sleep(0.3)
                 
-                # List directory contents
-                dir_contents = [f for f in os.listdir(work_dir)]
-                log(f"Directory contents: {dir_contents}", "📂")
-                
-                log(f"Pushing to Kaggle...", "📤")
+                # Push
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
-                    log(f"PUSH FAILED", "❌")
-                    log(f"Stderr: {stderr[:500]}", "")
-                    log(f"Stdout: {stdout[:500]}", "")
+                    log(f"PUSH FAILED: {stderr[:200]}", "❌")
                     return False
                 
-                log(f"Push OK: {notebook_name}", "✅")
-                log(f"URL: https://www.kaggle.com/code/{dest_slug}", "🔗")
+                log(f"Push OK: https://www.kaggle.com/code/{dest_slug}", "✅")
                 return True
                 
             except Exception as e:
                 log(f"EXCEPTION: {str(e)}", "❌")
-                import traceback
-                traceback.print_exc()
                 return False
-                
             finally:
-                # Cleanup
                 if os.path.exists(work_dir):
-                    try:
-                        shutil.rmtree(work_dir)
-                    except:
-                        pass
+                    try: shutil.rmtree(work_dir)
+                    except: pass
 
         # ========================================
-        # PARALLEL EXECUTION WORKER
+        # WORKER WRAPPER
         # ========================================
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading
-        
-        results_lock = threading.Lock()
-        
         def execute_notebook_wrapper(args):
-            """Wrapper for parallel execution with stagger delay"""
             account, notebook_name, dest_slug, server_id, start_delay = args
-            
-            # Stagger the start to avoid Kaggle API rate limiting
             if start_delay > 0:
                 time.sleep(start_delay)
-            
             result_key = f"{account['username']}/{notebook_name}"
             success = execute_notebook(account, notebook_name, dest_slug, server_id)
             return (result_key, success)
@@ -264,108 +220,70 @@ jobs:
         # ========================================
         def execute_all():
             start = datetime.utcnow()
-            
-            # Detect current day
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - FIREBASE EDITION", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - SEQUENTIAL ID EDITION", "🚀")
             log("═" * 70, "")
-            log(f"Current Day: {current_day}", "📅")
-            log(f"Execution Time: {start.isoformat()}", "🕐")
-            log(f"Firebase Dataset: {FIREBASE_DATASET_REF}", "🔥")
             
-            # Check if day has configuration
             if current_day not in WEEKLY_SCHEDULE:
-                log(f"ERROR: {current_day} not in schedule!", "❌")
+                log(f"Error: Day {current_day} not found in schedule.", "❌")
                 sys.exit(1)
             
             accounts_today = WEEKLY_SCHEDULE[current_day]
             
-            # Check if day has accounts
             if not accounts_today:
-                log(f"⚠️ No accounts configured for {current_day}. Skipping execution.", "⏭️")
-                log("Please add account credentials for this day in the workflow configuration.", "")
+                log(f"No accounts for {current_day}. Exiting.", "⏭️")
                 sys.exit(0)
             
-            log(f"Accounts scheduled: {len(accounts_today)}", "👥")
-            log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
-            log(f"Mode: ALWAYS CREATE (Fresh notebooks every time)", "⚡")
-            log(f"Credential System: Firebase (from dataset)", "🔐")
-            log(f"Stagger: 2s interval to avoid API limits", "⏱️")
+            log(f"Target: {len(accounts_today)} accounts", "👥")
+            log("Mode: Sequential Server IDs (server-1, server-2, server-3...)", "🔢")
             log("═" * 70, "")
             
-            # Prepare all tasks
             tasks = []
-            task_index = 0
-            global_notebook_id = 1  # Sequential numbering for BOTH filename and SERVER_ID
             
-            for account_idx, account in enumerate(accounts_today):
-                log(f"📋 Preparing tasks for: {account['username']}", "")
-                
-                # Each account gets 2 notebooks with sequential IDs
-                for i in range(2):
-                    notebook_name = f"server-{global_notebook_id}"  # server-1, server-2, server-3, server-4...
-                    server_id = f"server_{global_notebook_id}"      # server_1, server_2, server_3, server_4...
-                    dest_slug = f"{account['username']}/{notebook_name}"
+            # GLOBAL COUNTER: Ensures Server 1, Server 2, Server 3... across ALL accounts
+            global_counter = 1 
+            
+            task_delay_counter = 0
+
+            for account in accounts_today:
+                # Each account gets 2 notebooks
+                for _ in range(2):
+                    # Define names
+                    notebook_filename = f"server-{global_counter}" # File: server-1.ipynb
+                    server_var_id = f"server_{global_counter}"     # Var:  server_1
+                    dest_slug = f"{account['username']}/{notebook_filename}"
                     
-                    # Calculate stagger delay: 2 seconds between each task
-                    start_delay = task_index * 2
+                    # Calculate delay (stagger pushes by 3 seconds)
+                    delay = task_delay_counter * 3
                     
-                    log(f"  • {notebook_name} → {server_id} (start +{start_delay}s)", "")
+                    log(f"📋 Queuing: {dest_slug} (ID: {server_var_id})", "Pending")
                     
-                    tasks.append((account, notebook_name, dest_slug, server_id, start_delay))
-                    task_index += 1
-                    global_notebook_id += 1  # Increment for next notebook
+                    tasks.append((account, notebook_filename, dest_slug, server_var_id, delay))
+                    
+                    global_counter += 1
+                    task_delay_counter += 1
             
             log("", "")
-            log(f"🚀 Starting execution ({len(tasks)} notebooks, 2s stagger)...", "")
+            log(f"🚀 Launching {len(tasks)} notebooks...", "")
             log("═" * 70, "")
             
             results = {}
-            
-            # Execute all notebooks in parallel (with stagger)
             with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
                 future_to_task = {executor.submit(execute_notebook_wrapper, task): task for task in tasks}
-                
                 for future in as_completed(future_to_task):
-                    result_key, success = future.result()
-                    results[result_key] = success
-                    
-                    status = "✅" if success else "❌"
-                    log(f"{status} Completed: {result_key}", "")
-            
-            # Summary
+                    key, success = future.result()
+                    results[key] = success
+                    print(f"Completed: {key} -> {'✅ Success' if success else '❌ Failed'}")
+
+            # Final Summary
             success_count = sum(results.values())
-            duration = (datetime.utcnow() - start).total_seconds()
-            
-            log("", "")
             log("═" * 70, "")
-            log(f"EXECUTION SUMMARY", "🏁")
-            log("═" * 70, "")
-            log(f"Day: {current_day}", "📅")
-            log(f"Total Time: {duration:.1f}s ({duration/60:.1f} min)", "⏱️")
-            log(f"Success: {success_count}/{len(results)}", "📊")
-            log(f"Firebase Dataset: {FIREBASE_DATASET_REF}", "🔥")
-            log("", "")
+            log(f"SUMMARY: {success_count}/{len(tasks)} Successful", "🏁")
             
-            for nb_name, success in sorted(results.items()):
-                status = "✅" if success else "❌"
-                log(f"{status} {nb_name}", "")
-            
-            log("═" * 70, "")
-            
-            if success_count < len(results):
-                log(f"⚠️ {len(results) - success_count} notebook(s) failed", "")
+            if success_count < len(tasks):
                 sys.exit(1)
-            else:
-                log("🎉 All notebooks executed successfully!", "")
-                log("", "")
-                log("🔍 VERIFICATION: Check notebooks on Kaggle:", "")
-                for nb_name in sorted(results.keys()):
-                    log(f"   https://www.kaggle.com/code/{nb_name}", "🔗")
-                log("", "")
-                log("💡 Each notebook will auto-load Firebase credentials from the dataset!", "")
 
         execute_all()
         PYEOF
