@@ -1,4 +1,4 @@
-name: Kaggle Executor - T4 GPU Fix
+name: Kaggle Executor - T4 GPU Fix (Alternative)
 
 on:
   workflow_dispatch:
@@ -166,7 +166,7 @@ jobs:
                     # If we fail to replace, do NOT push, as it will run default ID
                     return False
                 
-                # STEP 3: Create Metadata with T4 GPU specification
+                # STEP 3: Create Metadata with T4 GPU specification (ALTERNATIVE FORMAT)
                 metadata = {
                     "id": dest_slug,
                     "title": notebook_name,
@@ -177,7 +177,7 @@ jobs:
                     "enable_gpu": True,
                     "enable_internet": True,
                     "enable_tpu": False,
-                    "gpu_type": "nvidiaTeslaT4",        # ← FIX: Specify T4 GPU
+                    "accelerator": "nvidiaTeslaT4",     # ← ALTERNATIVE: Try this field name
                     "dataset_sources": [FIREBASE_DATASET_REF],
                     "kernel_sources": [],
                     "competition_sources": []
@@ -190,7 +190,7 @@ jobs:
                 # STEP 4: Push to Kaggle
                 setup_kaggle_auth(account)
                 
-                log("Pushing...", "📤")
+                log("Pushing with T4 GPU...", "📤")
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
@@ -223,7 +223,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE EXECUTOR - T4 GPU FIX", "🚀")
+            log(f"KAGGLE EXECUTOR - T4 GPU FIX (ACCELERATOR FIELD)", "🚀")
             log("═" * 70, "")
             
             if current_day not in WEEKLY_SCHEDULE:
