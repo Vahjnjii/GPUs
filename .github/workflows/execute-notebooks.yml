@@ -1,4 +1,4 @@
-name: Kaggle Notebook Executor - Fixed Injection
+name: Kaggle Notebook Executor - Verbose Debug
 
 on:
   workflow_dispatch:
@@ -86,7 +86,16 @@ jobs:
 
         def run_cmd(cmd, timeout=180, cwd=None):
             try:
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+                # Capture both stdout and stderr explicitly
+                result = subprocess.run(
+                    cmd, 
+                    shell=True, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE, 
+                    text=True, 
+                    timeout=timeout, 
+                    cwd=cwd
+                )
                 return result.returncode == 0, result.stdout, result.stderr
             except subprocess.TimeoutExpired:
                 return False, "", "Timeout"
@@ -114,7 +123,7 @@ jobs:
                         if cell['cell_type'] == 'code':
                             new_source = []
                             for line in cell['source']:
-                                # Flexible match for SERVER_ID = ...
+                                # Flexible match
                                 if 'SERVER_ID' in line and '=' in line:
                                     new_source.append(new_line)
                                     found = True
@@ -125,7 +134,7 @@ jobs:
                 
                 # If variable wasn't found, INSERT it at the top
                 if not found:
-                    log(f"⚠️ SERVER_ID not found in code. Auto-inserting new cell...", "➕")
+                    log(f"⚠️ SERVER_ID not found. Auto-inserting cell...", "➕")
                     new_cell = {
                         "cell_type": "code",
                         "execution_count": None,
@@ -150,7 +159,6 @@ jobs:
         def execute_notebook(account, notebook_name, dest_slug, server_id):
             log(f"START: {notebook_name} → {account['username']}", "🚀")
             
-            # Use absolute paths for thread safety
             base_dir = os.getcwd()
             work_dir = os.path.join(base_dir, f"work_{notebook_name}_{account['username']}")
             
@@ -170,7 +178,7 @@ jobs:
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: Inject SERVER_ID (Smart JSON Mode)
+                # STEP 2: Inject SERVER_ID
                 if inject_server_id_smart(work_notebook_path, server_id):
                     log(f"✓ Injected: {server_id}", "💉")
                 else:
@@ -178,7 +186,6 @@ jobs:
                     return False
                 
                 # STEP 3: Create Metadata
-                # Format Title nicely: "Server 01"
                 try:
                     num_part = server_id.split('_')[-1]
                     formatted_title = f"Server {int(num_part):02d}"
@@ -205,14 +212,24 @@ jobs:
                 with open(metadata_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2)
                 
+                # DEBUG: Verify file existence
+                files_in_dir = os.listdir(work_dir)
+                log(f"Files ready: {files_in_dir}", "📂")
+                
                 # STEP 4: Push to Kaggle
                 setup_kaggle_auth(account)
                 
-                # Push
+                # DEBUG: Check if we can reach Kaggle
+                # s_chk, out_chk, err_chk = run_cmd("kaggle config view")
+                # if not s_chk: log(f"Config check failed: {err_chk}", "⚠️")
+
+                log("Pushing to Kaggle...", "📤")
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
-                    log(f"PUSH FAILED: {stderr[:200]}", "❌")
+                    log(f"PUSH FAILED!", "❌")
+                    log(f"--- STDOUT ---\n{stdout.strip()}", "")
+                    log(f"--- STDERR ---\n{stderr.strip()}", "")
                     return False
                 
                 log(f"Push OK: https://www.kaggle.com/code/{dest_slug}", "✅")
@@ -220,6 +237,8 @@ jobs:
                 
             except Exception as e:
                 log(f"EXCEPTION: {str(e)}", "❌")
+                import traceback
+                traceback.print_exc()
                 return False
             finally:
                 if os.path.exists(work_dir):
@@ -245,7 +264,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - SMART INJECTION", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - VERBOSE DEBUG", "🚀")
             log("═" * 70, "")
             
             if current_day not in WEEKLY_SCHEDULE:
@@ -294,7 +313,8 @@ jobs:
                 for future in as_completed(future_to_task):
                     key, success = future.result()
                     results[key] = success
-                    print(f"Completed: {key} -> {'✅ Success' if success else '❌ Failed'}")
+                    status = "✅ Success" if success else "❌ Failed"
+                    print(f"Result: {key} -> {status}")
 
             # Final Summary
             success_count = sum(results.values())
