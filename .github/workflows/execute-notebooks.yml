@@ -1,4 +1,4 @@
-name: Kaggle Notebook Executor - Verbose Debug
+name: Kaggle Notebook Executor - Final Fix
 
 on:
   workflow_dispatch:
@@ -36,13 +36,10 @@ jobs:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         # ========================================
-        # FIREBASE CONFIGURATION
+        # CONFIGURATION
         # ========================================
         FIREBASE_DATASET_REF = "shreevathsbbhh/firebase-credentials"
 
-        # ========================================
-        # WEEKLY SCHEDULE
-        # ========================================
         WEEKLY_SCHEDULE = {
             "Friday": [
                 {"username": "shreevathsaz", "key": "2faa3199cb4f8a0d88a8999604ac6770"},
@@ -86,7 +83,6 @@ jobs:
 
         def run_cmd(cmd, timeout=180, cwd=None):
             try:
-                # Capture both stdout and stderr explicitly
                 result = subprocess.run(
                     cmd, 
                     shell=True, 
@@ -123,7 +119,6 @@ jobs:
                         if cell['cell_type'] == 'code':
                             new_source = []
                             for line in cell['source']:
-                                # Flexible match
                                 if 'SERVER_ID' in line and '=' in line:
                                     new_source.append(new_line)
                                     found = True
@@ -185,16 +180,12 @@ jobs:
                     log(f"❌ Critical: Failed to inject {server_id}", "❌")
                     return False
                 
-                # STEP 3: Create Metadata
-                try:
-                    num_part = server_id.split('_')[-1]
-                    formatted_title = f"Server {int(num_part):02d}"
-                except:
-                    formatted_title = server_id.replace('_', ' ').title()
-
+                # STEP 3: Create Metadata (FIXED TITLE LOGIC)
+                # To avoid 409 Conflict, Title must be slug-compatible with ID
+                # ID: server-1 -> Title: server-1
                 metadata = {
                     "id": dest_slug,
-                    "title": formatted_title,
+                    "title": notebook_name, # "server-1" - Simple title to match ID/Slug exactly
                     "code_file": f"{notebook_name}.ipynb",
                     "language": "python",
                     "kernel_type": "notebook",
@@ -207,29 +198,26 @@ jobs:
                     "competition_sources": []
                 }
                 
-                # Save metadata
                 metadata_path = os.path.join(work_dir, "kernel-metadata.json")
                 with open(metadata_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2)
                 
-                # DEBUG: Verify file existence
-                files_in_dir = os.listdir(work_dir)
-                log(f"Files ready: {files_in_dir}", "📂")
-                
                 # STEP 4: Push to Kaggle
                 setup_kaggle_auth(account)
                 
-                # DEBUG: Check if we can reach Kaggle
-                # s_chk, out_chk, err_chk = run_cmd("kaggle config view")
-                # if not s_chk: log(f"Config check failed: {err_chk}", "⚠️")
-
                 log("Pushing to Kaggle...", "📤")
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
-                    log(f"PUSH FAILED!", "❌")
-                    log(f"--- STDOUT ---\n{stdout.strip()}", "")
-                    log(f"--- STDERR ---\n{stderr.strip()}", "")
+                    log(f"PUSH FAILED (Attempt 1)", "⚠️")
+                    # If conflict, sometimes it helps to check status, but usually metadata fix handles it.
+                    # Retrying blindly rarely works for 409, but let's log the full error
+                    log(f"STDOUT: {stdout.strip()}", "")
+                    log(f"STDERR: {stderr.strip()}", "")
+                    
+                    # Optional: Verify if kernel exists
+                    s, o, e = run_cmd(f"kaggle kernels status {dest_slug}", timeout=30)
+                    log(f"Status Check: {o.strip() if s else e.strip()}", "🔍")
                     return False
                 
                 log(f"Push OK: https://www.kaggle.com/code/{dest_slug}", "✅")
@@ -237,8 +225,6 @@ jobs:
                 
             except Exception as e:
                 log(f"EXCEPTION: {str(e)}", "❌")
-                import traceback
-                traceback.print_exc()
                 return False
             finally:
                 if os.path.exists(work_dir):
@@ -246,66 +232,51 @@ jobs:
                     except: pass
 
         # ========================================
-        # WORKER WRAPPER
+        # MAIN EXECUTION
         # ========================================
         def execute_notebook_wrapper(args):
             account, notebook_name, dest_slug, server_id, start_delay = args
-            if start_delay > 0:
-                time.sleep(start_delay)
+            if start_delay > 0: time.sleep(start_delay)
             result_key = f"{account['username']}/{notebook_name}"
             success = execute_notebook(account, notebook_name, dest_slug, server_id)
             return (result_key, success)
         
-        # ========================================
-        # MAIN EXECUTION
-        # ========================================
         def execute_all():
             start = datetime.utcnow()
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - VERBOSE DEBUG", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - CONFLICT FIX", "🚀")
             log("═" * 70, "")
             
             if current_day not in WEEKLY_SCHEDULE:
-                log(f"Error: Day {current_day} not found in schedule.", "❌")
+                log(f"Error: Day {current_day} not found.", "❌")
                 sys.exit(1)
             
             accounts_today = WEEKLY_SCHEDULE[current_day]
-            
             if not accounts_today:
-                log(f"No accounts for {current_day}. Exiting.", "⏭️")
+                log(f"No accounts for {current_day}.", "⏭️")
                 sys.exit(0)
             
             log(f"Target: {len(accounts_today)} accounts", "👥")
-            log("Mode: Sequential IDs + Smart Injection", "🔧")
-            log("═" * 70, "")
+            log("Mode: Matching Title/Slug (Fixes 409 Conflict)", "🔧")
             
             tasks = []
-            
-            # GLOBAL COUNTER: Server 1, Server 2...
             global_counter = 1 
             task_delay_counter = 0
 
             for account in accounts_today:
-                # Each account gets 2 notebooks
                 for _ in range(2):
-                    notebook_filename = f"server-{global_counter}" # server-1
-                    server_var_id = f"server_{global_counter}"     # server_1
+                    notebook_filename = f"server-{global_counter}" 
+                    server_var_id = f"server_{global_counter}"     
                     dest_slug = f"{account['username']}/{notebook_filename}"
-                    
                     delay = task_delay_counter * 3
-                    
-                    log(f"📋 Queuing: {dest_slug} (ID: {server_var_id})", "Pending")
-                    
                     tasks.append((account, notebook_filename, dest_slug, server_var_id, delay))
-                    
                     global_counter += 1
                     task_delay_counter += 1
             
-            log("", "")
-            log(f"🚀 Launching {len(tasks)} notebooks...", "")
             log("═" * 70, "")
+            log(f"🚀 Launching {len(tasks)} notebooks...", "")
             
             results = {}
             with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
@@ -313,10 +284,8 @@ jobs:
                 for future in as_completed(future_to_task):
                     key, success = future.result()
                     results[key] = success
-                    status = "✅ Success" if success else "❌ Failed"
-                    print(f"Result: {key} -> {status}")
+                    print(f"Result: {key} -> {'✅ Success' if success else '❌ Failed'}")
 
-            # Final Summary
             success_count = sum(results.values())
             log("═" * 70, "")
             log(f"SUMMARY: {success_count}/{len(tasks)} Successful", "🏁")
