@@ -1,4 +1,4 @@
-name: Kaggle Executor - T4 GPU Fix (Force Delete)
+name: Kaggle Executor - T4 GPU Fix (Thread Safe)
 
 on:
   workflow_dispatch:
@@ -72,17 +72,12 @@ jobs:
             print(f"[{timestamp}] {symbol} {msg}")
             sys.stdout.flush()
 
-        def setup_kaggle_auth(account):
-            kaggle_dir = os.path.join(os.path.expanduser("~"), ".kaggle")
-            os.makedirs(kaggle_dir, exist_ok=True)
-            kaggle_json = os.path.join(kaggle_dir, "kaggle.json")
-            with open(kaggle_json, 'w') as f:
-                json.dump({"username": account["username"], "key": account["key"]}, f)
-            os.chmod(kaggle_json, 0o600)
-            log(f"Auth set: {account['username']}", "🔑")
-
-        def run_cmd(cmd, timeout=180, cwd=None):
+        # UPDATED: Now accepts 'env' dictionary to handle auth safely
+        def run_cmd(cmd, timeout=180, cwd=None, env=None):
             try:
+                # If no specific env provided, use current system env
+                run_env = env if env else os.environ.copy()
+                
                 result = subprocess.run(
                     cmd, 
                     shell=True, 
@@ -90,7 +85,8 @@ jobs:
                     stderr=subprocess.PIPE, 
                     text=True, 
                     timeout=timeout, 
-                    cwd=cwd
+                    cwd=cwd,
+                    env=run_env  # Pass the isolated credentials here
                 )
                 return result.returncode == 0, result.stdout, result.stderr
             except subprocess.TimeoutExpired:
@@ -118,20 +114,15 @@ jobs:
             except Exception as e:
                 return False, str(e)
 
-        # ==============================================================
-        # FORCE T4 METADATA
-        # ==============================================================
         def inject_t4_metadata(notebook_path):
             try:
                 with open(notebook_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                # Create structure if missing
                 if 'metadata' not in data: data['metadata'] = {}
                 if 'kaggle' not in data['metadata']: data['metadata']['kaggle'] = {}
                 
                 # FORCE T4 SETTINGS
-                # This ensures the NEW kernel is created as T4
                 data['metadata']['kaggle']['accelerator'] = 'nvidiaTeslaT4'
                 data['metadata']['kaggle']['isGpuEnabled'] = True
                 
@@ -148,20 +139,20 @@ jobs:
             base_dir = os.getcwd()
             work_dir = os.path.join(base_dir, f"work_{notebook_name}_{account['username']}")
             
+            # PREPARE AUTH ENVIRONMENT VARIABLES
+            # This ensures this specific thread uses ONLY these credentials
+            auth_env = os.environ.copy()
+            auth_env["KAGGLE_USERNAME"] = account["username"]
+            auth_env["KAGGLE_KEY"] = account["key"]
+            
             try:
-                # Setup Auth first (needed for delete)
-                setup_kaggle_auth(account)
-
-                # ====================================================
-                # KEY FIX: DELETE EXISTING KERNEL (RESET HARDWARE)
-                # ====================================================
+                # 1. DELETE EXISTING KERNEL (Using Env Vars)
                 log(f"Resetting kernel {dest_slug}...", "♻️")
-                # We ignore errors here because if the kernel doesn't exist, it returns 404, which is fine.
-                run_cmd(f"kaggle kernels delete {dest_slug} -y", timeout=60)
-                # Short sleep to ensure Kaggle backend processes the deletion
-                time.sleep(5)
+                # We ignore errors (like 404 not found) for delete
+                run_cmd(f"kaggle kernels delete {dest_slug} -y", timeout=60, env=auth_env)
+                time.sleep(5) # Wait for deletion to propagate
                 
-                # Prepare Directory
+                # 2. Prepare Directory
                 if os.path.exists(work_dir):
                     shutil.rmtree(work_dir)
                 os.makedirs(work_dir)
@@ -174,15 +165,15 @@ jobs:
                     
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # 1. Inject Server ID
+                # 3. Inject Server ID
                 inject_server_id_raw(work_notebook_path, server_id)
 
-                # 2. Inject T4 Metadata
+                # 4. Inject T4 Metadata
                 t4_success, t4_msg = inject_t4_metadata(work_notebook_path)
                 if t4_success:
                     log(f"✓ {t4_msg}", "⚡")
                 
-                # 3. Create Metadata
+                # 5. Create Metadata
                 metadata = {
                     "id": dest_slug,
                     "title": notebook_name,
@@ -199,9 +190,9 @@ jobs:
                 with open(os.path.join(work_dir, "kernel-metadata.json"), 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2)
                 
-                # 4. Push (This will now be a creation event, reading the T4 metadata)
+                # 6. Push (Using Env Vars)
                 log("Pushing new T4 kernel...", "📤")
-                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
+                success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir, env=auth_env)
                 
                 if not success:
                     log(f"PUSH FAILED: {stderr.strip()}", "❌")
@@ -227,6 +218,7 @@ jobs:
         
         def execute_all():
             current_day = datetime.utcnow().strftime('%A')
+            log(f"KAGGLE EXECUTOR - T4 GPU FIX (THREAD SAFE)", "🚀")
             
             if current_day not in WEEKLY_SCHEDULE:
                 sys.exit(1)
