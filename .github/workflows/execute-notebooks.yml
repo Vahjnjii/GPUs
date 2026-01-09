@@ -298,14 +298,16 @@ jobs:
             # Prepare all tasks
             tasks = []
             task_index = 0
-            global_server_id = 1  # Sequential SERVER_ID across ALL notebooks
+            global_notebook_id = 1  # Sequential numbering for BOTH filename and SERVER_ID
             
             for account_idx, account in enumerate(accounts_today):
                 log(f"📋 Preparing tasks for: {account['username']}", "")
                 
-                for notebook_name in ["server-1", "server-2"]:
+                # Each account gets 2 notebooks with sequential IDs
+                for i in range(2):
+                    notebook_name = f"server-{global_notebook_id}"  # server-1, server-2, server-3, server-4...
+                    server_id = f"server_{global_notebook_id}"      # server_1, server_2, server_3, server_4...
                     dest_slug = f"{account['username']}/{notebook_name}"
-                    server_id = f"server_{global_server_id}"  # Sequential: server_1, server_2, server_3, server_4...
                     
                     # Calculate stagger delay: 2 seconds between each task
                     start_delay = task_index * 2
@@ -314,7 +316,7 @@ jobs:
                     
                     tasks.append((account, notebook_name, dest_slug, server_id, start_delay))
                     task_index += 1
-                    global_server_id += 1  # Increment for next notebook
+                    global_notebook_id += 1  # Increment for next notebook
             
             log("", "")
             log(f"🚀 Starting execution ({len(tasks)} notebooks, 2s stagger)...", "")
