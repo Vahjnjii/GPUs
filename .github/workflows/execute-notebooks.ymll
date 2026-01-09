@@ -1,4 +1,4 @@
-name: Kaggle Notebook Executor - V3 Final
+name: Kaggle Notebook Executor - Firebase Edition
 
 on:
   workflow_dispatch:
@@ -34,20 +34,13 @@ jobs:
         import time
 
         # ========================================
-        # REDIS POOL (10 instances)
+        # FIREBASE CONFIGURATION
         # ========================================
-        REDIS_POOL = [
-            ("https://fair-drake-18300.upstash.io", "AUd8AAIncDE4ZGIzNjkzNjk0N2I0MDZhYjQzNWI4ZmQzMTIxZmViNnAxMTgzMDA"),
-            ("https://learning-alpaca-18314.upstash.io", "AUeKAAIncDFkMmU5NTUxNTQwZWU0NjkwYmYwYjFlYmExYzE3YmUwNHAxMTgzMTQ"),
-            ("https://moved-grouper-18341.upstash.io", "AUelAAIncDFiODAzNDQ4ZjY5YTE0YThhODg0NzEwZTNiOWI4OGFkZXAxMTgzNDE"),
-            ("https://ace-spaniel-18358.upstash.io", "AUe2AAIncDFlNjA3NjY2MWUzMGI0MDc3YWM3NWIyZDY4OTE5MDAzYXAxMTgzNTg"),
-            ("https://wondrous-lab-18392.upstash.io", "AUfYAAIncDE0YmY3MWZmYmY1MmU0NzdmYTg2MzM0ODk1MzdiMjIxMXAxMTgzOTI"),
-            ("https://native-lamprey-11246.upstash.io", "ASvuAAIncDIwMjZhNjljYTQwMGM0MDM5OGE3ZWFlMDZiNGNjYWYyMnAyMTEyNDY"),
-            ("https://harmless-humpback-11251.upstash.io", "ASvzAAIncDI1ZDM4ZmU3YTY4NDE0NDE1YmUxYzY1NjQzNTk5Yjg1YnAyMTEyNTE"),
-            ("https://game-gobbler-11253.upstash.io", "ASv1AAIncDIwM2VmMjI0ODNhNWQ0NjYwOTgxMDU4ZDMxMGRlZDFhNHAyMTEyNTM"),
-            ("https://fond-doberman-11259.upstash.io", "ASv7AAIncDJmZThiNzIwNGQ0ZWM0NzE0ODA3YzAxODY0NWEzNGM4Y3AyMTEyNTk"),
-            ("https://absolute-redfish-9172.upstash.io", "ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg")
-        ]
+        FIREBASE_DATASET = "firebase-credentials"  # ← Your Kaggle dataset name
+        FIREBASE_DATASET_OWNER = "YOUR_USERNAME"   # ← Change to your Kaggle username
+        
+        # Full dataset reference (format: username/dataset-name)
+        FIREBASE_DATASET_REF = f"{FIREBASE_DATASET_OWNER}/{FIREBASE_DATASET}"
 
         # ========================================
         # WEEKLY SCHEDULE
@@ -109,38 +102,52 @@ jobs:
             except Exception as e:
                 return False, "", str(e)
 
-        def inject_redis_credentials_text(notebook_path, redis_url, redis_token):
+        def inject_server_id(notebook_path, server_id):
             """
-            Inject Redis credentials using text-based replacement (FIXED for escaped quotes)
-            Replaces just the URL/Token without quotes to avoid JSON escaping issues
+            Inject SERVER_ID into the notebook using text-based replacement.
+            Replaces: SERVER_ID = "server_1" with appropriate server number
             """
-            # Read notebook as plain text
             with open(notebook_path, 'r', encoding='utf-8') as f:
                 notebook_text = f.read()
             
-            # CRITICAL FIX: Replace just the URL (no quotes!) to handle JSON escaping
-            # In JSON, it appears as: "UPSTASH_REDIS_REST_URL = \\"https://...\\"
-            # So we replace just the URL part: https://...
+            # Replace SERVER_ID value (handles JSON escaping automatically)
             notebook_text = notebook_text.replace(
-                'https://absolute-redfish-9172.upstash.io',
-                redis_url
+                'SERVER_ID = "server_1"',
+                f'SERVER_ID = "{server_id}"'
             )
             
-            # Replace Token (just the token value, no quotes)
-            notebook_text = notebook_text.replace(
-                'ASPUAAImcDE1MzBmZjIxMGNkYzY0YzBmYjFkZTNlZmE4NzY1ZjlhN3AxOTE3Mg',
-                redis_token
-            )
-            
-            # Write back
             with open(notebook_path, 'w', encoding='utf-8') as f:
                 f.write(notebook_text)
             
             return True
 
-        def execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token):
+        def get_dataset_id(dataset_ref):
+            """
+            Retrieve the numeric dataset ID from Kaggle API.
+            Format: username/dataset-name → numeric ID
+            """
+            try:
+                # Use kaggle API to get dataset info
+                cmd = f'kaggle datasets status {dataset_ref}'
+                success, stdout, stderr = run_cmd(cmd, timeout=30)
+                
+                if success and stdout:
+                    # Parse dataset info - this is a simplified approach
+                    # In production, you might want to use kaggle API directly
+                    log(f"Dataset found: {dataset_ref}", "✅")
+                    # Return a placeholder - Kaggle will resolve by ref
+                    return dataset_ref
+                else:
+                    log(f"Warning: Could not verify dataset {dataset_ref}", "⚠️")
+                    return dataset_ref
+            except Exception as e:
+                log(f"Dataset check error: {e}", "⚠️")
+                return dataset_ref
+
+        def execute_notebook(account, notebook_name, dest_slug, server_id):
             log(f"START: {notebook_name} → {account['username']}", "🚀")
-            log(f"  Redis: {redis_url.split('//')[1].split('.')[0]}", "🔗")
+            log(f"  Server ID: {server_id}", "🔧")
+            log(f"  Dataset: {FIREBASE_DATASET_REF}", "🔥")
             
             # Use absolute paths for thread safety
             base_dir = os.getcwd()
@@ -154,31 +161,29 @@ jobs:
                 
                 # STEP 1: Copy base notebook from repo
                 log(f"Loading base notebook template...", "📂")
-                base_notebook_path = os.path.join(base_dir, "server-8.ipynb")
+                base_notebook_path = os.path.join(base_dir, "gpuss.ipynb")
                 
                 if not os.path.exists(base_notebook_path):
-                    log(f"ERROR: server-4.ipynb not found in repository!", "❌")
+                    log(f"ERROR: gpuss.ipynb not found in repository!", "❌")
                     return False
                 
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: Inject Redis credentials (TEXT-BASED - URL only, no quotes!)
-                log(f"Injecting Redis credentials...", "💉")
-                inject_redis_credentials_text(work_notebook_path, redis_url, redis_token)
+                # STEP 2: Inject SERVER_ID
+                log(f"Injecting SERVER_ID: {server_id}...", "💉")
+                inject_server_id(work_notebook_path, server_id)
                 
-                # Verify injection worked (check for URL without protocol prefix)
+                # Verify injection
                 with open(work_notebook_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    # Check if new URL is present (just domain part to be sure)
-                    url_domain = redis_url.split('//')[1].split('.')[0]  # e.g., "fair-drake-18300"
-                    if url_domain in content:
-                        log(f"✓ Verified: {url_domain} injected successfully", "🔍")
+                    if f'SERVER_ID = "{server_id}"' in content:
+                        log(f"✓ Verified: {server_id} injected successfully", "🔍")
                     else:
-                        log(f"⚠️ Warning: {url_domain} not found in notebook!", "⚠️")
+                        log(f"⚠️ Warning: {server_id} not found in notebook!", "⚠️")
                 
-                # STEP 3: Create FRESH metadata (ALWAYS CREATE MODE)
-                log(f"Creating fresh metadata (always create mode)...", "🆕")
+                # STEP 3: Create metadata with Firebase dataset
+                log(f"Creating metadata with Firebase dataset...", "📝")
                 metadata = {
                     "id": dest_slug,
                     "title": notebook_name,
@@ -189,7 +194,7 @@ jobs:
                     "enable_gpu": True,
                     "enable_internet": True,
                     "enable_tpu": False,
-                    "dataset_sources": [],
+                    "dataset_sources": [FIREBASE_DATASET_REF],  # Firebase credentials dataset
                     "kernel_sources": [],
                     "competition_sources": []
                 }
@@ -199,9 +204,10 @@ jobs:
                 with open(metadata_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2)
                 
-                log(f"Metadata created: id={metadata['id']}", "📝")
+                log(f"Metadata created: id={metadata['id']}", "📋")
+                log(f"  Dataset attached: {FIREBASE_DATASET_REF}", "📎")
                 
-                # STEP 4: Push to Kaggle (THREAD-SAFE with cwd parameter)
+                # STEP 4: Push to Kaggle
                 setup_kaggle_auth(account)
                 time.sleep(0.3)
                 
@@ -246,14 +252,14 @@ jobs:
         
         def execute_notebook_wrapper(args):
             """Wrapper for parallel execution with stagger delay"""
-            account, notebook_name, dest_slug, redis_url, redis_token, start_delay = args
+            account, notebook_name, dest_slug, server_id, start_delay = args
             
             # Stagger the start to avoid Kaggle API rate limiting
             if start_delay > 0:
                 time.sleep(start_delay)
             
             result_key = f"{account['username']}/{notebook_name}"
-            success = execute_notebook(account, notebook_name, dest_slug, redis_url, redis_token)
+            success = execute_notebook(account, notebook_name, dest_slug, server_id)
             return (result_key, success)
         
         # ========================================
@@ -266,10 +272,11 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - V3 FINAL (URL-Only Replacement)", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - FIREBASE EDITION", "🚀")
             log("═" * 70, "")
             log(f"Current Day: {current_day}", "📅")
             log(f"Execution Time: {start.isoformat()}", "🕐")
+            log(f"Firebase Dataset: {FIREBASE_DATASET_REF}", "🔥")
             
             # Check if day has configuration
             if current_day not in WEEKLY_SCHEDULE:
@@ -287,16 +294,9 @@ jobs:
             log(f"Accounts scheduled: {len(accounts_today)}", "👥")
             log(f"Total notebooks to execute: {len(accounts_today) * 2}", "📊")
             log(f"Mode: ALWAYS CREATE (Fresh notebooks every time)", "⚡")
-            log(f"Injection: URL-only replacement (handles JSON escaping)", "💉")
+            log(f"Credential System: Firebase (from dataset)", "🔐")
             log(f"Stagger: 2s interval to avoid API limits", "⏱️")
             log("═" * 70, "")
-            
-            # Calculate starting Redis index based on day
-            day_order = ["Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
-            redis_index = 0
-            if current_day in day_order:
-                day_position = day_order.index(current_day)
-                redis_index = day_position * 4
             
             # Prepare all tasks
             tasks = []
@@ -304,17 +304,16 @@ jobs:
             for account_idx, account in enumerate(accounts_today):
                 log(f"📋 Preparing tasks for: {account['username']}", "")
                 
-                for notebook_name in ["server-1", "server-2"]:
+                for notebook_idx, notebook_name in enumerate(["server-1", "server-2"], 1):
                     dest_slug = f"{account['username']}/{notebook_name}"
-                    redis_url, redis_token = REDIS_POOL[redis_index % len(REDIS_POOL)]
+                    server_id = f"server_{notebook_idx}"
                     
                     # Calculate stagger delay: 2 seconds between each task
                     start_delay = task_index * 2
                     
-                    log(f"  • {notebook_name} → Redis: {redis_url.split('//')[1].split('.')[0]} (start +{start_delay}s)", "")
+                    log(f"  • {notebook_name} → {server_id} (start +{start_delay}s)", "")
                     
-                    tasks.append((account, notebook_name, dest_slug, redis_url, redis_token, start_delay))
-                    redis_index += 1
+                    tasks.append((account, notebook_name, dest_slug, server_id, start_delay))
                     task_index += 1
             
             log("", "")
@@ -345,6 +344,7 @@ jobs:
             log(f"Day: {current_day}", "📅")
             log(f"Total Time: {duration:.1f}s ({duration/60:.1f} min)", "⏱️")
             log(f"Success: {success_count}/{len(results)}", "📊")
+            log(f"Firebase Dataset: {FIREBASE_DATASET_REF}", "🔥")
             log("", "")
             
             for nb_name, success in sorted(results.items()):
@@ -359,9 +359,11 @@ jobs:
             else:
                 log("🎉 All notebooks executed successfully!", "")
                 log("", "")
-                log("🔍 VERIFICATION: Check notebooks on Kaggle to confirm unique Redis URLs:", "")
+                log("🔍 VERIFICATION: Check notebooks on Kaggle:", "")
                 for nb_name in sorted(results.keys()):
                     log(f"   https://www.kaggle.com/code/{nb_name}", "🔗")
+                log("", "")
+                log("💡 Each notebook will auto-load Firebase credentials from the dataset!", "")
 
         execute_all()
         PYEOF
