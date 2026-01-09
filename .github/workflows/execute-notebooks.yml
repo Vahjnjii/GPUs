@@ -1,4 +1,4 @@
-name: Kaggle Notebook Executor - Firebase Edition
+name: Kaggle Notebook Executor - Fixed Injection
 
 on:
   workflow_dispatch:
@@ -38,7 +38,6 @@ jobs:
         # ========================================
         # FIREBASE CONFIGURATION
         # ========================================
-        # Public Firebase credentials dataset
         FIREBASE_DATASET_REF = "shreevathsbbhh/firebase-credentials"
 
         # ========================================
@@ -63,7 +62,6 @@ jobs:
             ],
             "Tuesday": [
                 {"username": "leommmmm", "key": "c88472f292e5de46c97952906d79c896"}
-                # Add more accounts here
             ],
             "Wednesday": [],
             "Thursday": []
@@ -95,31 +93,54 @@ jobs:
             except Exception as e:
                 return False, "", str(e)
 
-        def inject_server_id_regex(notebook_path, server_id):
+        def inject_server_id_smart(notebook_path, server_id):
             """
-            Inject SERVER_ID using Regex. 
-            Finds ANY 'SERVER_ID = "..."' and replaces it.
+            Robust Injection:
+            1. Parses notebook as JSON.
+            2. Looks for 'SERVER_ID =' line in code cells.
+            3. If found -> Replaces it.
+            4. If NOT found -> Creates a NEW cell at the top.
             """
             try:
                 with open(notebook_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                    nb = json.load(f)
                 
-                # Regex to find: SERVER_ID = "anything" (handling spaces)
-                # Replaces with: SERVER_ID = "server_1" (or whatever ID is passed)
-                pattern = r'SERVER_ID\s*=\s*".*?"'
-                replacement = f'SERVER_ID = "{server_id}"'
+                found = False
+                new_line = f'SERVER_ID = "{server_id}"\n'
                 
-                new_content, count = re.subn(pattern, replacement, content)
+                # Check existing cells
+                if 'cells' in nb:
+                    for cell in nb['cells']:
+                        if cell['cell_type'] == 'code':
+                            new_source = []
+                            for line in cell['source']:
+                                # Flexible match for SERVER_ID = ...
+                                if 'SERVER_ID' in line and '=' in line:
+                                    new_source.append(new_line)
+                                    found = True
+                                else:
+                                    new_source.append(line)
+                            cell['source'] = new_source
+                            if found: break
                 
-                if count == 0:
-                    # Fallback: If variable not found, append it to the top (or logging warning)
-                    log(f"⚠️ Variable SERVER_ID not found to replace! Appending...", "⚠️")
-                    # This is a basic append to the start of the file string - risky in JSON but better than nothing
-                    # Ideally, your base notebook MUST have SERVER_ID = "default" defined.
-                    return False
-                
+                # If variable wasn't found, INSERT it at the top
+                if not found:
+                    log(f"⚠️ SERVER_ID not found in code. Auto-inserting new cell...", "➕")
+                    new_cell = {
+                        "cell_type": "code",
+                        "execution_count": None,
+                        "metadata": {},
+                        "outputs": [],
+                        "source": [
+                            "# Auto-generated Server ID configuration\n",
+                            new_line
+                        ]
+                    }
+                    if 'cells' not in nb: nb['cells'] = []
+                    nb['cells'].insert(0, new_cell)
+                    
                 with open(notebook_path, 'w', encoding='utf-8') as f:
-                    f.write(new_content)
+                    json.dump(nb, f, indent=1)
                     
                 return True
             except Exception as e:
@@ -149,19 +170,20 @@ jobs:
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: Inject SERVER_ID (Robust Regex Mode)
-                if inject_server_id_regex(work_notebook_path, server_id):
+                # STEP 2: Inject SERVER_ID (Smart JSON Mode)
+                if inject_server_id_smart(work_notebook_path, server_id):
                     log(f"✓ Injected: {server_id}", "💉")
                 else:
-                    log(f"❌ Failed to inject {server_id} (Check variable name in gpuss.ipynb)", "❌")
+                    log(f"❌ Critical: Failed to inject {server_id}", "❌")
+                    return False
                 
                 # STEP 3: Create Metadata
-                # Title formatting: "Server 1" -> "Server 01" for sorting
-                title_num = server_id.split('_')[-1]
-                if title_num.isdigit():
-                    formatted_title = f"Server {int(title_num):02d}"
-                else:
-                    formatted_title = server_id
+                # Format Title nicely: "Server 01"
+                try:
+                    num_part = server_id.split('_')[-1]
+                    formatted_title = f"Server {int(num_part):02d}"
+                except:
+                    formatted_title = server_id.replace('_', ' ').title()
 
                 metadata = {
                     "id": dest_slug,
@@ -223,7 +245,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - SEQUENTIAL ID EDITION", "🚀")
+            log(f"KAGGLE NOTEBOOK EXECUTOR - SMART INJECTION", "🚀")
             log("═" * 70, "")
             
             if current_day not in WEEKLY_SCHEDULE:
@@ -237,25 +259,22 @@ jobs:
                 sys.exit(0)
             
             log(f"Target: {len(accounts_today)} accounts", "👥")
-            log("Mode: Sequential Server IDs (server-1, server-2, server-3...)", "🔢")
+            log("Mode: Sequential IDs + Smart Injection", "🔧")
             log("═" * 70, "")
             
             tasks = []
             
-            # GLOBAL COUNTER: Ensures Server 1, Server 2, Server 3... across ALL accounts
+            # GLOBAL COUNTER: Server 1, Server 2...
             global_counter = 1 
-            
             task_delay_counter = 0
 
             for account in accounts_today:
                 # Each account gets 2 notebooks
                 for _ in range(2):
-                    # Define names
-                    notebook_filename = f"server-{global_counter}" # File: server-1.ipynb
-                    server_var_id = f"server_{global_counter}"     # Var:  server_1
+                    notebook_filename = f"server-{global_counter}" # server-1
+                    server_var_id = f"server_{global_counter}"     # server_1
                     dest_slug = f"{account['username']}/{notebook_filename}"
                     
-                    # Calculate delay (stagger pushes by 3 seconds)
                     delay = task_delay_counter * 3
                     
                     log(f"📋 Queuing: {dest_slug} (ID: {server_var_id})", "Pending")
