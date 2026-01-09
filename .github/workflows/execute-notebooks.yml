@@ -1,4 +1,4 @@
-name: Kaggle Executor - T4 GPU Fix (Alternative)
+name: Kaggle Executor - T4 GPU Fix
 
 on:
   workflow_dispatch:
@@ -100,21 +100,12 @@ jobs:
 
         def inject_server_id_raw(notebook_path, server_id):
             """
-            NUCLEAR OPTION:
             Reads file as raw text and uses Regex to replace the specific line.
-            Does NOT add new cells. Modifies in-place.
-            Matches: SERVER_ID = "..." (and handles JSON escaped quotes)
+            Matches: SERVER_ID = "..." 
             """
             try:
                 with open(notebook_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                
-                # Regex Explanation:
-                # SERVER_ID\s*=\s*    Finds 'SERVER_ID =' with any spacing
-                # \\?["']             Finds opening quote (optional backslash for JSON escape)
-                # .*?                 Matches content inside quotes
-                # \\?["']             Finds closing quote
-                # We replace the content inside quotes with our new ID
                 
                 pattern = r'(SERVER_ID\s*=\s*\\?["\']).*?(\\?["\'])'
                 replacement = f'\\g<1>{server_id}\\g<2>'
@@ -126,11 +117,36 @@ jobs:
                         f.write(new_content)
                     return True, f"Replaced {count} occurrence(s)"
                 else:
-                    # Debug info if not found
                     snippet_idx = content.find("SERVER_ID")
                     snippet = content[snippet_idx:snippet_idx+50] if snippet_idx != -1 else "Not Found"
                     return False, f"Pattern not found. Snippet: {snippet}"
                     
+            except Exception as e:
+                return False, str(e)
+
+        def inject_t4_metadata(notebook_path):
+            """
+            Opens the .ipynb JSON and forces the accelerator metadata to T4.
+            This is required because kernel-metadata.json gpu_type is often ignored.
+            """
+            try:
+                with open(notebook_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # Ensure metadata structure exists
+                if 'metadata' not in data:
+                    data['metadata'] = {}
+                if 'kaggle' not in data['metadata']:
+                    data['metadata']['kaggle'] = {}
+                
+                # FORCE T4 SETTINGS
+                data['metadata']['kaggle']['accelerator'] = 'nvidiaTeslaT4'
+                data['metadata']['kaggle']['isGpuEnabled'] = True
+                
+                with open(notebook_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
+                
+                return True, "T4 Metadata Injected"
             except Exception as e:
                 return False, str(e)
 
@@ -157,16 +173,24 @@ jobs:
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: RAW TEXT INJECTION
+                # STEP 2: RAW TEXT INJECTION (SERVER ID)
                 success, msg = inject_server_id_raw(work_notebook_path, server_id)
                 if success:
                     log(f"✓ {msg} -> {server_id}", "💉")
                 else:
                     log(f"❌ INJECTION FAILED: {msg}", "❌")
-                    # If we fail to replace, do NOT push, as it will run default ID
                     return False
+
+                # STEP 2.5: FORCE T4 METADATA INJECTION
+                # We inject this at the same time as the Server ID
+                t4_success, t4_msg = inject_t4_metadata(work_notebook_path)
+                if t4_success:
+                    log(f"✓ {t4_msg}", "⚡")
+                else:
+                    log(f"⚠ T4 INJECTION FAILED: {t4_msg}", "⚠")
                 
-                # STEP 3: Create Metadata with T4 GPU specification (ALTERNATIVE FORMAT)
+                # STEP 3: Create Metadata 
+                # Note: We still keep gpu_type here just in case, but Step 2.5 is the real fix
                 metadata = {
                     "id": dest_slug,
                     "title": notebook_name,
@@ -177,7 +201,7 @@ jobs:
                     "enable_gpu": True,
                     "enable_internet": True,
                     "enable_tpu": False,
-                    "accelerator": "nvidiaTeslaT4",     # ← ALTERNATIVE: Try this field name
+                    "gpu_type": "nvidiaTeslaT4",
                     "dataset_sources": [FIREBASE_DATASET_REF],
                     "kernel_sources": [],
                     "competition_sources": []
@@ -190,7 +214,7 @@ jobs:
                 # STEP 4: Push to Kaggle
                 setup_kaggle_auth(account)
                 
-                log("Pushing with T4 GPU...", "📤")
+                log("Pushing...", "📤")
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
@@ -223,7 +247,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE EXECUTOR - T4 GPU FIX (ACCELERATOR FIELD)", "🚀")
+            log(f"KAGGLE EXECUTOR - T4 GPU FIX", "🚀")
             log("═" * 70, "")
             
             if current_day not in WEEKLY_SCHEDULE:
