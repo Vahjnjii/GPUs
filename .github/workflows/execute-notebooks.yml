@@ -1,4 +1,4 @@
-name: Kaggle Notebook Executor - Final Fix
+name: Kaggle Executor - Final ID Fix
 
 on:
   workflow_dispatch:
@@ -98,46 +98,49 @@ jobs:
             except Exception as e:
                 return False, "", str(e)
 
-        def inject_server_id_smart(notebook_path, server_id):
+        def inject_server_id_force(notebook_path, server_id):
             """
-            Robust Injection:
-            1. Parses notebook as JSON.
-            2. Looks for 'SERVER_ID =' line in code cells.
-            3. If found -> Replaces it.
-            4. If NOT found -> Creates a NEW cell at the top.
+            FORCE REPLACEMENT MODE:
+            Scans every line of code using REGEX. 
+            If it sees 'SERVER_ID = ...', it overwrites it.
             """
             try:
                 with open(notebook_path, 'r', encoding='utf-8') as f:
                     nb = json.load(f)
                 
                 found = False
-                new_line = f'SERVER_ID = "{server_id}"\n'
+                # The line we want to insert
+                target_line = f'SERVER_ID = "{server_id}"\n'
                 
-                # Check existing cells
+                # Regex to find: SERVER_ID = "anything" or SERVER_ID = 'anything'
+                # Handles spaces like: SERVER_ID= "val"
+                pattern = re.compile(r'^\s*SERVER_ID\s*=\s*[\'"].*?[\'"]', re.MULTILINE)
+
                 if 'cells' in nb:
                     for cell in nb['cells']:
                         if cell['cell_type'] == 'code':
                             new_source = []
                             for line in cell['source']:
-                                if 'SERVER_ID' in line and '=' in line:
-                                    new_source.append(new_line)
+                                # Check if this line defines the variable
+                                if pattern.match(line) or 'SERVER_ID' in line and '=' in line:
+                                    # REPLACE IT
+                                    new_source.append(target_line)
                                     found = True
                                 else:
                                     new_source.append(line)
                             cell['source'] = new_source
-                            if found: break
                 
-                # If variable wasn't found, INSERT it at the top
+                # If variable was never defined in the file, PREPEND it to the top
                 if not found:
-                    log(f"⚠️ SERVER_ID not found. Auto-inserting cell...", "➕")
+                    log(f"⚠️ SERVER_ID not found. Prepending new cell...", "➕")
                     new_cell = {
                         "cell_type": "code",
                         "execution_count": None,
                         "metadata": {},
                         "outputs": [],
                         "source": [
-                            "# Auto-generated Server ID configuration\n",
-                            new_line
+                            "# Auto-generated configuration\n",
+                            target_line
                         ]
                     }
                     if 'cells' not in nb: nb['cells'] = []
@@ -153,6 +156,7 @@ jobs:
 
         def execute_notebook(account, notebook_name, dest_slug, server_id):
             log(f"START: {notebook_name} → {account['username']}", "🚀")
+            log(f"  ID to Inject: {server_id}", "🔧")
             
             base_dir = os.getcwd()
             work_dir = os.path.join(base_dir, f"work_{notebook_name}_{account['username']}")
@@ -173,19 +177,18 @@ jobs:
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: Inject SERVER_ID
-                if inject_server_id_smart(work_notebook_path, server_id):
-                    log(f"✓ Injected: {server_id}", "💉")
+                # STEP 2: Force Inject SERVER_ID
+                if inject_server_id_force(work_notebook_path, server_id):
+                    log(f"✓ Modified code to: SERVER_ID = \"{server_id}\"", "💉")
                 else:
-                    log(f"❌ Critical: Failed to inject {server_id}", "❌")
+                    log(f"❌ Failed to inject code", "❌")
                     return False
                 
-                # STEP 3: Create Metadata (FIXED TITLE LOGIC)
-                # To avoid 409 Conflict, Title must be slug-compatible with ID
-                # ID: server-1 -> Title: server-1
+                # STEP 3: Create Metadata
+                # Matches Title to Slug to avoid 409 Conflict
                 metadata = {
                     "id": dest_slug,
-                    "title": notebook_name, # "server-1" - Simple title to match ID/Slug exactly
+                    "title": notebook_name, # "server-1" matches ID
                     "code_file": f"{notebook_name}.ipynb",
                     "language": "python",
                     "kernel_type": "notebook",
@@ -205,19 +208,12 @@ jobs:
                 # STEP 4: Push to Kaggle
                 setup_kaggle_auth(account)
                 
-                log("Pushing to Kaggle...", "📤")
+                log("Pushing...", "📤")
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
-                    log(f"PUSH FAILED (Attempt 1)", "⚠️")
-                    # If conflict, sometimes it helps to check status, but usually metadata fix handles it.
-                    # Retrying blindly rarely works for 409, but let's log the full error
-                    log(f"STDOUT: {stdout.strip()}", "")
+                    log(f"PUSH FAILED", "❌")
                     log(f"STDERR: {stderr.strip()}", "")
-                    
-                    # Optional: Verify if kernel exists
-                    s, o, e = run_cmd(f"kaggle kernels status {dest_slug}", timeout=30)
-                    log(f"Status Check: {o.strip() if s else e.strip()}", "🔍")
                     return False
                 
                 log(f"Push OK: https://www.kaggle.com/code/{dest_slug}", "✅")
@@ -246,7 +242,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE NOTEBOOK EXECUTOR - CONFLICT FIX", "🚀")
+            log(f"KAGGLE EXECUTOR - FORCE UPDATE EDITION", "🚀")
             log("═" * 70, "")
             
             if current_day not in WEEKLY_SCHEDULE:
@@ -259,18 +255,23 @@ jobs:
                 sys.exit(0)
             
             log(f"Target: {len(accounts_today)} accounts", "👥")
-            log("Mode: Matching Title/Slug (Fixes 409 Conflict)", "🔧")
             
             tasks = []
             global_counter = 1 
             task_delay_counter = 0
 
+            # ---------------------------------------------------------
+            # LOOP GENERATION: Ensures server-1, server-2, server-3...
+            # ---------------------------------------------------------
             for account in accounts_today:
                 for _ in range(2):
                     notebook_filename = f"server-{global_counter}" 
                     server_var_id = f"server_{global_counter}"     
                     dest_slug = f"{account['username']}/{notebook_filename}"
+                    
+                    # Stagger pushes by 3 seconds
                     delay = task_delay_counter * 3
+                    
                     tasks.append((account, notebook_filename, dest_slug, server_var_id, delay))
                     global_counter += 1
                     task_delay_counter += 1
