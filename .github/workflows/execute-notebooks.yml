@@ -1,4 +1,4 @@
-name: Kaggle Executor - T4 GPU REAL FIX
+name: Kaggle Executor - Final Raw Fix
 
 on:
   workflow_dispatch:
@@ -98,53 +98,39 @@ jobs:
             except Exception as e:
                 return False, "", str(e)
 
-        def modify_notebook_metadata(notebook_path, server_id):
+        def inject_server_id_raw(notebook_path, server_id):
             """
-            CRITICAL FIX: Modify notebook's INTERNAL metadata to:
-            1. Replace SERVER_ID in code
-            2. Ensure accelerator = nvidiaTeslaT4 in metadata
-            3. Preserve all other settings
+            NUCLEAR OPTION:
+            Reads file as raw text and uses Regex to replace the specific line.
+            Does NOT add new cells. Modifies in-place.
+            Matches: SERVER_ID = "..." (and handles JSON escaped quotes)
             """
             try:
-                # Load notebook as JSON
                 with open(notebook_path, 'r', encoding='utf-8') as f:
-                    notebook = json.load(f)
+                    content = f.read()
                 
-                # STEP 1: Replace SERVER_ID in code cells
-                for cell in notebook.get('cells', []):
-                    if cell.get('cell_type') == 'code' and 'source' in cell:
-                        source = cell['source']
-                        if isinstance(source, list):
-                            source = ''.join(source)
-                        
-                        # Replace SERVER_ID value
-                        pattern = r'(SERVER_ID\s*=\s*["\']).*?(["\'])'
-                        replacement = f'\\g<1>{server_id}\\g<2>'
-                        new_source = re.sub(pattern, replacement, source)
-                        
-                        # Convert back to list format
-                        cell['source'] = new_source.split('\n')
-                        if cell['source'] and not cell['source'][-1].endswith('\n'):
-                            cell['source'][-1] += '\n'
+                # Regex Explanation:
+                # SERVER_ID\s*=\s*    Finds 'SERVER_ID =' with any spacing
+                # \\?["']             Finds opening quote (optional backslash for JSON escape)
+                # .*?                 Matches content inside quotes
+                # \\?["']             Finds closing quote
+                # We replace the content inside quotes with our new ID
                 
-                # STEP 2: Ensure T4 GPU in metadata
-                if 'metadata' not in notebook:
-                    notebook['metadata'] = {}
+                pattern = r'(SERVER_ID\s*=\s*\\?["\']).*?(\\?["\'])'
+                replacement = f'\\g<1>{server_id}\\g<2>'
                 
-                if 'kaggle' not in notebook['metadata']:
-                    notebook['metadata']['kaggle'] = {}
+                new_content, count = re.subn(pattern, replacement, content)
                 
-                # FORCE T4 GPU
-                notebook['metadata']['kaggle']['accelerator'] = 'nvidiaTeslaT4'
-                notebook['metadata']['kaggle']['isGpuEnabled'] = True
-                notebook['metadata']['kaggle']['isInternetEnabled'] = True
-                
-                # Save modified notebook
-                with open(notebook_path, 'w', encoding='utf-8') as f:
-                    json.dump(notebook, f, indent=1)
-                
-                return True, "SERVER_ID replaced + T4 GPU enforced"
-                
+                if count > 0:
+                    with open(notebook_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                    return True, f"Replaced {count} occurrence(s)"
+                else:
+                    # Debug info if not found
+                    snippet_idx = content.find("SERVER_ID")
+                    snippet = content[snippet_idx:snippet_idx+50] if snippet_idx != -1 else "Not Found"
+                    return False, f"Pattern not found. Snippet: {snippet}"
+                    
             except Exception as e:
                 return False, str(e)
 
@@ -171,29 +157,30 @@ jobs:
                 work_notebook_path = os.path.join(work_dir, f"{notebook_name}.ipynb")
                 shutil.copy(base_notebook_path, work_notebook_path)
                 
-                # STEP 2: MODIFY NOTEBOOK INTERNAL METADATA (THE REAL FIX!)
-                success, msg = modify_notebook_metadata(work_notebook_path, server_id)
+                # STEP 2: RAW TEXT INJECTION
+                success, msg = inject_server_id_raw(work_notebook_path, server_id)
                 if success:
-                    log(f"✓ {msg}", "💉")
+                    log(f"✓ {msg} -> {server_id}", "💉")
                 else:
-                    log(f"❌ MODIFICATION FAILED: {msg}", "❌")
+                    log(f"❌ INJECTION FAILED: {msg}", "❌")
+                    # If we fail to replace, do NOT push, as it will run default ID
                     return False
                 
-                # STEP 3: Create minimal metadata (DON'T override GPU settings!)
+                # STEP 3: Create Metadata
                 metadata = {
                     "id": dest_slug,
-                    "title": notebook_name,
+                    "title": notebook_name, # Simple title to match slug
                     "code_file": f"{notebook_name}.ipynb",
                     "language": "python",
                     "kernel_type": "notebook",
                     "is_private": True,
                     "enable_gpu": True,
                     "enable_internet": True,
+                    "enable_tpu": False,
                     "dataset_sources": [FIREBASE_DATASET_REF],
-                    "kernel_sources": []
+                    "kernel_sources": [],
+                    "competition_sources": []
                 }
-                
-                # DO NOT add gpu_type or accelerator here - let notebook's internal metadata handle it
                 
                 metadata_path = os.path.join(work_dir, "kernel-metadata.json")
                 with open(metadata_path, 'w', encoding='utf-8') as f:
@@ -202,7 +189,7 @@ jobs:
                 # STEP 4: Push to Kaggle
                 setup_kaggle_auth(account)
                 
-                log("Pushing with T4 GPU (preserved from notebook metadata)...", "📤")
+                log("Pushing...", "📤")
                 success, stdout, stderr = run_cmd("kaggle kernels push", timeout=240, cwd=work_dir)
                 
                 if not success:
@@ -235,7 +222,7 @@ jobs:
             current_day = datetime.utcnow().strftime('%A')
             
             log("═" * 70, "")
-            log(f"KAGGLE EXECUTOR - T4 GPU REAL FIX (METADATA PRESERVATION)", "🚀")
+            log(f"KAGGLE EXECUTOR - RAW TEXT REPLACEMENT", "🚀")
             log("═" * 70, "")
             
             if current_day not in WEEKLY_SCHEDULE:
@@ -264,7 +251,7 @@ jobs:
                     task_delay_counter += 1
             
             log("═" * 70, "")
-            log(f"🚀 Launching {len(tasks)} notebooks with T4 GPU...", "")
+            log(f"🚀 Launching {len(tasks)} notebooks...", "")
             
             results = {}
             with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
