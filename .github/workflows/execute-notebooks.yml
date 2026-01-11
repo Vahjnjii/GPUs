@@ -58,9 +58,13 @@ jobs:
                 {"username": "riocom", "key": "79898aeec842d5ef19dd7acbd0c7f356"}
             ],
             "Tuesday": [
-                {"username": "leommmmm", "key": "c88472f292e5de46c97952906d79c896"}
+                {"username": "leommmmm", "key": "c88472f292e5de46c97952906d79c896"},
+                {"username": "vathsamajibail", "key": "cbda90918a7df5e172464036b5fc03be"}
             ],
-            "Wednesday": [],
+            "Wednesday": [
+                {"username": "muralimajibail", "key": "4b143ed80363d0ebbd1b723a422a0ba4"},
+                {"username": "muralidharamajibail", "key": "f538834832f67ca2caccf99bcdea931d"}
+            ],
             "Thursday": []
         }
 
